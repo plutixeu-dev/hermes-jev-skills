@@ -18,6 +18,7 @@ import copy
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -218,6 +219,17 @@ def _fits(default: Any, value: Any) -> bool:
     return True
 
 
+def _orders(value: Any) -> Dict[str, List[str]]:
+    """`frontier_order` with every order a list of agent names. One name alone is an order of one."""
+    out: Dict[str, List[str]] = {}
+    for kind, order in (value.items() if isinstance(value, dict) else ()):
+        if isinstance(order, str):
+            order = [order]
+        if isinstance(order, list):
+            out[str(kind)] = [name for name in order if isinstance(name, str)]
+    return out
+
+
 def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
     """The defaults with each file laid over them. A missing or broken file is skipped, never fatal."""
     policy = copy.deepcopy(DEFAULT_POLICY)
@@ -235,6 +247,11 @@ def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
                     continue
                 merged = dict(policy["agents"].get(name, {}))
                 for key, value in settings.items():
+                    if key == "argv" and isinstance(value, str):
+                        try:
+                            value = shlex.split(value)     # a command line, as a person writes one
+                        except ValueError:                 # an unbalanced quote: keep the default
+                            continue
                     if key in _AGENT_SHAPE:
                         value = _coerce(_AGENT_SHAPE[key], value)
                     if key not in _AGENT_SHAPE or _fits(_AGENT_SHAPE[key], value):
@@ -250,6 +267,7 @@ def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
                 policy[key] = {**policy[key], **value}
             else:
                 policy[key] = value
+    policy["frontier_order"] = _orders(policy.get("frontier_order"))
     return policy
 
 
@@ -350,7 +368,9 @@ def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], 
     config = config or route.load_config()
     inner = route.unwrap(text, config)
     limit = int(config.get("ask_chars", 2500))
-    features_only = privacy_class not in (policy.get("jev_text_for") or [])
+    # A turn that looks like it holds a secret sends Jev features only, exactly as routing does,
+    # even when its class lets it leave as a question about secrets (privacy.has_secret_value).
+    features_only = privacy_class not in (policy.get("jev_text_for") or []) or privacy.is_sensitive(inner)
     if answers is None:
         state = route.state_for(route.clip_ask(inner, limit), context_tokens=context_tokens,
                                 private=features_only, limit=limit)

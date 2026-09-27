@@ -261,7 +261,7 @@ class PolicyFileTests(unittest.TestCase):
         defaults = dispatch.load_policy(NOWHERE)
         for key in ("frontier_order", "tier_to_niveau", "handoff", "turn_budget"):
             self.assertEqual(loaded[key], defaults[key], key)
-        self.assertEqual(loaded["agents"]["claude"]["argv"], ["claude -p"])     # one string: a list of one
+        self.assertEqual(loaded["agents"]["claude"]["argv"], ["claude", "-p"])
         self.assertEqual((loaded["agents"]["claude"]["timeout"], loaded["agents"]["claude"]["model"]), (600, "opus"))
 
     def test_one_term_given_as_a_string_is_kept_not_dropped(self):
@@ -269,6 +269,14 @@ class PolicyFileTests(unittest.TestCase):
         self.assertEqual(loaded["sensitive_terms"], ["salaris"])
         self.assertEqual(dispatch.privacy_class("Wat is mijn salaris?", profile="coding", policy=loaded)[0],
                          "highly_sensitive")
+
+    def test_an_argument_list_written_as_one_string_is_split_like_a_command_line(self):
+        loaded = self.load({"agents": {"openai": {"argv": "codex exec --json -"}}})
+        self.assertEqual(loaded["agents"]["openai"]["argv"], ["codex", "exec", "--json", "-"])
+
+    def test_one_agent_named_in_an_order_is_an_order_of_one(self):
+        loaded = self.load({"frontier_order": {"default": "openai"}})
+        self.assertEqual(loaded["frontier_order"], {"repo": ["claude", "openai"], "default": ["openai"]})
 
 
 def answers(p_hard=0.0, p_simple=0.0, confidence=0.9, kind="general", stakes=0.1):
@@ -360,6 +368,13 @@ class ClassifyTests(unittest.TestCase):
     def test_incomplete_answers_are_not_a_judgement(self):
         record = self.classify(answers={"difficulty": {"score": 1.0}})
         self.assertEqual((record["niveau"], record["source"]), ("standard", "fail_open"))
+
+    def test_a_turn_with_words_about_secrets_sends_features_as_routing_does(self):
+        wire = Wire()
+        self.classify(text="Why is my API key rejected by the proxy?", transport=wire)
+        sent = json.dumps(wire.bodies)
+        self.assertNotIn("rejected by the proxy", sent)
+        self.assertIn("turn_features", sent)
 
 
 class JudgeAnswersTests(unittest.TestCase):
