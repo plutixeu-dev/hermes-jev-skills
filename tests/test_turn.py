@@ -17,15 +17,30 @@ those turns outright. Those tests assert the transport was never called.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from jevkit import client, privacy, route, skillpick, turn  # noqa: E402
 
-TURN = "count the lines of code in this repo and write the total into the changelog"
+
+def setUpModule():
+    """client.ask resolves a key before it touches the fake wire.
+
+    Without one it raises no_key, so these tests passed only where a real key happened to be
+    installed. An obviously fake key in the environment is read first, so the keychain is
+    never consulted either.
+    """
+    patcher = mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-key-not-real"})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
+TURN ="count the lines of code in this repo and write the total into the changelog"
 
 SKILLS = [
     {"name": "codebase-inspection", "description": "Count lines of code with pygount", "path": "skills/a/SKILL.md"},
