@@ -38,6 +38,10 @@ def setUpModule():
     patcher = mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-key-not-real"})
     patcher.start()
     unittest.addModuleCleanup(patcher.stop)
+    # With a key present, a test that forgot its transport would send its data for real.
+    guard = mock.patch.object(client, "_http_transport", side_effect=AssertionError("a test reached the network"))
+    guard.start()
+    unittest.addModuleCleanup(guard.stop)
 
 
 TURN = "count the lines of code in this repo and write the total into the changelog"

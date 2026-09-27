@@ -60,18 +60,22 @@ def check_triage(record: Any) -> List[str]:
         errors.append("context_tokens must be a whole number, 0 or more")
     if "repo_werk" in record and not isinstance(record["repo_werk"], bool):
         errors.append("repo_werk must be true or false")
-    if decision == "ASK" and str(record.get("question", "")).count("?") != 1:
+    question, assumption, reason = (record.get(key) for key in ("question", "assumption", "reason"))
+    if decision == "ASK" and not (isinstance(question, str) and question.count("?") == 1
+                                  and len(question.strip()) >= 4):
         errors.append("ASK needs a question with exactly one question mark")
-    if decision == "ASSUME" and len(str(record.get("assumption", "")).strip()) < 4:
+    if decision == "ASSUME" and not (isinstance(assumption, str) and len(assumption.strip()) >= 4):
         errors.append("ASSUME needs an assumption")
-    if decision == "ESCALATE" and len(str(record.get("reason", "")).strip()) < 4:
+    if decision == "ESCALATE" and not (isinstance(reason, str) and len(reason.strip()) >= 4):
         errors.append("ESCALATE needs a reason")
     return errors
 
 
 def parse_triage(text: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
     """The one TRIAGE line in a model's output, validated: (record, []) or (None, errors)."""
-    found = _TRIAGE_LINE.findall(text or "")
+    if not isinstance(text, str):
+        return None, ["TRIAGE input is not text"]
+    found = _TRIAGE_LINE.findall(text)
     if not found:
         return None, ["no TRIAGE line"]
     if len(found) > 1:
@@ -80,6 +84,8 @@ def parse_triage(text: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         record = json.loads(found[0])
     except json.JSONDecodeError as error:
         return None, [f"TRIAGE is not valid JSON ({error.msg})"]
+    except (ValueError, RecursionError):
+        return None, ["TRIAGE is not valid JSON (too deep or too large)"]
     errors = check_triage(record)
     return (None, errors) if errors else (record, [])
 
@@ -88,11 +94,12 @@ def parse_triage(text: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
 # highly sensitive: only this machine may answer it. A long term counts anywhere, so plurals and
 # compounds do too ("dossiers", "zorgdossier"); a short one only as a whole word. Deliberately
 # not "client", "token" or "diagnose": in a coding chat those are ordinary words, and a gate that
-# fires on every other coding turn gets switched off. dispatch.json can add terms
+# fires on every other coding turn gets switched off. "clienten" and "patienten" are the Dutch
+# words typed without the trema; neither is an English word. dispatch.json can add terms
 # (`sensitive_terms`); it never removes these.
 DEFAULT_SENSITIVE_TERMS = (
-    "cliënt", "patiënt", "dossier", "gespreksverslag", "behandelplan", "anamnese", "medicatie",
-    "strafblad", "schulden", "burgerservicenummer", "bsn", "iban",
+    "cliënt", "patiënt", "clienten", "patienten", "dossier", "gespreksverslag", "behandelplan", "anamnese",
+    "medicatie", "strafblad", "schulden", "burgerservicenummer", "bsn", "iban",
 )
 
 
@@ -103,28 +110,42 @@ def _mentions(lowered: str, term: str) -> bool:
     return re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", lowered) is not None
 
 
+def _extra_terms(policy: Dict[str, Any]) -> Tuple[str, ...]:
+    """`sensitive_terms` from dispatch.json: one string is one term, never a string of letters."""
+    extra = policy.get("sensitive_terms")
+    if isinstance(extra, str):
+        return (extra,)
+    if isinstance(extra, (list, tuple)):
+        return tuple(term for term in extra if isinstance(term, str) and term.strip())
+    return ()
+
+
 def privacy_class(text: str, *, profile: Optional[str], policy: Dict[str, Any]) -> Tuple[str, str]:
     """(class, why) for one turn: the stricter of what the profile is and what the text shows.
 
     A profile nobody classified gets `default_privacy`, highly sensitive unless the policy says
     otherwise: an unknown lane stays on this machine.
     """
-    profiles = policy.get("profiles") or {}
-    base = profiles.get(profile or "default") or policy.get("default_privacy") or "highly_sensitive"
+    profiles = policy.get("profiles") if isinstance(policy.get("profiles"), dict) else {}
+    name = profile or "default"
+    classified = profiles.get(name)
+    base = classified or policy.get("default_privacy") or "highly_sensitive"
     if base not in PRIVACY:
         base = "highly_sensitive"
     probe = privacy.normalize(text or "")
-    if privacy.is_sensitive(probe):
-        return "highly_sensitive", "looks like it holds a secret"
+    if privacy.has_secret_value(probe):
+        return "highly_sensitive", "holds a secret value"
     lowered = probe.lower()
-    for term in DEFAULT_SENSITIVE_TERMS + tuple(policy.get("sensitive_terms") or ()):
-        if _mentions(lowered, str(term)):
+    for term in DEFAULT_SENSITIVE_TERMS + _extra_terms(policy):
+        if _mentions(lowered, term):
             return "highly_sensitive", f"mentions {term}"
     if privacy.has_iban(probe):
         return "highly_sensitive", "holds an IBAN"
     if base == "public" and privacy.has_contact_details(probe):
         return "private", "holds contact details"
-    return base, f"profile {profile or 'default'}"
+    if classified in PRIVACY:
+        return base, f"profile {name}"
+    return base, f"profile {name} is not classified, so {base}"
 
 
 LOCAL = "local"
@@ -168,6 +189,35 @@ def policy_paths() -> List[Path]:
     return paths
 
 
+# Every agent setting the code reads, with the type a file must give it. A value of another
+# type is dropped and the default stays: `"enabled": "false"` is a string, so it is not a yes.
+_AGENT_SHAPE: Dict[str, Any] = {"kind": "", "enabled": False, "model": "", "privacy": [], "only_repo": False,
+                                "max_turns": 8, "timeout": 600, "cooldown": 1800, "context_tokens": 0, "argv": []}
+
+
+def _coerce(default: Any, value: Any) -> Any:
+    """One string where a list of strings is expected is a list of one, never dropped.
+
+    Dropping it would be the unsafe direction: `"sensitive_terms": "salaris"` would lose the term.
+    """
+    return [value] if isinstance(default, list) and isinstance(value, str) else value
+
+
+def _fits(default: Any, value: Any) -> bool:
+    """Does a value from a file have the type of the default it would replace."""
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    if isinstance(default, (int, float)):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if isinstance(default, str):
+        return isinstance(value, str)
+    if isinstance(default, list):
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if isinstance(default, dict):
+        return isinstance(value, dict)
+    return True
+
+
 def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
     """The defaults with each file laid over them. A missing or broken file is skipped, never fatal."""
     policy = copy.deepcopy(DEFAULT_POLICY)
@@ -181,10 +231,19 @@ def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
         agents = layer.get("agents")
         if isinstance(agents, dict):
             for name, settings in agents.items():
-                if isinstance(settings, dict):
-                    policy["agents"][name] = {**policy["agents"].get(name, {}), **settings}
+                if not isinstance(settings, dict):
+                    continue
+                merged = dict(policy["agents"].get(name, {}))
+                for key, value in settings.items():
+                    if key in _AGENT_SHAPE:
+                        value = _coerce(_AGENT_SHAPE[key], value)
+                    if key not in _AGENT_SHAPE or _fits(_AGENT_SHAPE[key], value):
+                        merged[key] = value
+                policy["agents"][name] = merged
         for key, value in layer.items():
-            if key == "agents":
+            if key in DEFAULT_POLICY:
+                value = _coerce(DEFAULT_POLICY[key], value)
+            if key == "agents" or (key in DEFAULT_POLICY and not _fits(DEFAULT_POLICY[key], value)):
                 continue
             # One level deep, so a file that changes one order or one profile keeps the others.
             if isinstance(value, dict) and isinstance(policy.get(key), dict):

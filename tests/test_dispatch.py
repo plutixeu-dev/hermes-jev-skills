@@ -85,8 +85,8 @@ class PrivacyClassTests(unittest.TestCase):
         self.assertEqual(self.klass("mijn OPENAI_API_KEY=nietecht123"), "highly_sensitive")
 
     def test_words_about_someone_elses_file_make_it_highly_sensitive(self):
-        self.assertEqual(self.klass("Vat het gespreksverslag van mijn cliënt samen", profile="default"),
-                         "highly_sensitive")
+        for text in ("Vat het gespreksverslag samen", "Wat vindt mijn cliënt ervan?"):
+            self.assertEqual(self.klass(text, profile="default"), "highly_sensitive", text)
 
     def test_client_in_code_is_not_a_person(self):
         self.assertEqual(self.klass("Why does my HTTP client time out?"), "public")
@@ -244,6 +244,32 @@ class PolicyFileTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"JEV_DISPATCH_POLICY": str(path)}):
                 self.assertEqual(dispatch.load_policy()["mode"], "shadow")
 
+    def load(self, layer):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dispatch.json"
+            path.write_text(json.dumps(layer))
+            return dispatch.load_policy(path)
+
+    def test_enabled_written_as_a_string_is_not_a_yes(self):
+        loaded = self.load({"profiles": {"default": "private"}, "agents": {"openai": {"enabled": "false"}}})
+        self.assertIs(loaded["agents"]["openai"]["enabled"], False)
+        self.assertEqual(dispatch.choose_route(triage(), loaded, cooling=NOT_COOLING)["agent"], "local")
+
+    def test_a_setting_of_the_wrong_type_keeps_its_default(self):
+        loaded = self.load({"frontier_order": ["openai"], "tier_to_niveau": [], "handoff": 5, "turn_budget": "lang",
+                            "agents": {"claude": {"argv": "claude -p", "timeout": "600", "model": "opus"}}})
+        defaults = dispatch.load_policy(NOWHERE)
+        for key in ("frontier_order", "tier_to_niveau", "handoff", "turn_budget"):
+            self.assertEqual(loaded[key], defaults[key], key)
+        self.assertEqual(loaded["agents"]["claude"]["argv"], ["claude -p"])     # one string: a list of one
+        self.assertEqual((loaded["agents"]["claude"]["timeout"], loaded["agents"]["claude"]["model"]), (600, "opus"))
+
+    def test_one_term_given_as_a_string_is_kept_not_dropped(self):
+        loaded = self.load({"sensitive_terms": "salaris", "profiles": {"coding": "public"}})
+        self.assertEqual(loaded["sensitive_terms"], ["salaris"])
+        self.assertEqual(dispatch.privacy_class("Wat is mijn salaris?", profile="coding", policy=loaded)[0],
+                         "highly_sensitive")
+
 
 def answers(p_hard=0.0, p_simple=0.0, confidence=0.9, kind="general", stakes=0.1):
     rest = max(0.0, 1.0 - p_hard - p_simple)
@@ -347,3 +373,54 @@ class JudgeAnswersTests(unittest.TestCase):
         config = dispatch.route.load_config(NOWHERE)
         self.assertEqual(dispatch.route.judge_answers(answers(p_hard=0.8), config, risky=False,
                                                       features_only=False)["tier"], "hard")
+
+
+class ReviewFixTests(unittest.TestCase):
+    def klass(self, text, profile="coding", policy=POLICY):
+        return dispatch.privacy_class(text, profile=profile, policy=policy)
+
+    def test_a_null_reason_or_a_bare_question_mark_is_not_one(self):
+        _, errors = dispatch.parse_triage(line(exit="ESCALATE", signals=["G8"], niveau="frontier", reason=None))
+        self.assertTrue(any("reason" in e for e in errors))
+        _, errors = dispatch.parse_triage(line(exit="ASK", niveau=None, signals=["G4"], question="?"))
+        self.assertTrue(any("question" in e for e in errors))
+
+    def test_input_that_breaks_the_json_parser_is_an_error_not_a_crash(self):
+        self.assertIsNone(dispatch.parse_triage(b"TRIAGE {}")[0])
+        self.assertIsNone(dispatch.parse_triage("TRIAGE {\"a\": " + "[" * 100000)[0])
+        self.assertIsNone(dispatch.parse_triage('TRIAGE {"context_tokens": ' + "9" * 5000 + "}")[0])
+
+    def test_a_coding_question_about_secrets_is_not_a_secret(self):
+        for text in ("How do I hash a password in Python?", "Why is my API key rejected?",
+                     "id = Column(Integer, primary_key=True)", "cache_key = f(x)", "page_token=next_token",
+                     "export OPENAI_API_KEY=$OPENAI_API_KEY"):
+            self.assertEqual(self.klass(text)[0], "public", text)
+
+    def test_a_secret_value_is_still_highly_sensitive(self):
+        for text in ("my password is hunter22", "wachtwoord: Welkom01!", "Authorization: Bearer abcdefghijklmnop123",
+                     "-----BEGIN RSA PRIVATE KEY-----",
+                     "secret: " + "wJalrXUtnFEMI" + "/K7MDENG/bPxRfiCY" + "EXAMPLEKEY"):
+            self.assertEqual(self.klass(text)[0], "highly_sensitive", text)
+
+    def test_code_is_not_contact_details(self):
+        for text in ("git clone git@github.com:owner/repo.git", "ts=1727452076 max=2147483647",
+                     "Date.now() gave 1727452076123", "commit 73a8c72552aa0b1f", "2024-09-27 release"):
+            self.assertEqual(self.klass(text)[0], "public", text)
+
+    def test_a_phone_number_as_people_write_one_is(self):
+        for text in ("Bel me op 06-12345678", "+31 6 1234 5678", "(555) 123-4567", "020-7946099"):
+            self.assertEqual(self.klass(text)[0], "private", text)
+
+    def test_terms_without_the_trema_count(self):
+        self.assertEqual(self.klass("Hoeveel clienten heb je vandaag?")[0], "highly_sensitive")
+
+    def test_a_single_term_given_as_a_string_is_one_term(self):
+        policy = {**POLICY, "sensitive_terms": "salaris"}
+        self.assertEqual(self.klass("Wat is mijn salaris?", policy=policy), ("highly_sensitive", "mentions salaris"))
+        self.assertEqual(self.klass("Leg uit wat een bind mount is.", policy=policy)[0], "public")
+
+    def test_profiles_that_are_not_a_mapping_count_as_unclassified(self):
+        self.assertEqual(self.klass("hoi", policy={**POLICY, "profiles": ["coding"]})[0], "highly_sensitive")
+
+    def test_the_reason_says_when_a_profile_is_not_classified(self):
+        self.assertIn("not classified", self.klass("hoi", profile="onbekend")[1])

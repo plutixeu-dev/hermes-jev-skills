@@ -93,10 +93,59 @@ def is_sensitive(text: str) -> bool:
                 or _SECRET_ASSIGNMENT.search(probe) or _TOKEN_SHAPES.search(probe))
 
 
-def has_contact_details(text: str) -> bool:
-    """An email address or a phone number: data about a person, even when it is your own."""
+# What a credential looks like as a value, as opposed to a word about one. `is_sensitive` answers
+# the broader question for Jev, whose call can be skipped at no cost. A handoff to another agent
+# cannot be skipped that cheaply, and "how do I hash a password?" holds no password.
+_LABELLED_VALUE = re.compile(
+    r"(?i)\b(?:password|passwd|wachtwoord|pincode|passphrase|secret|token|api[_ -]?key)\b"
+    r"(?:\s+(?:is|was|=|:)|\s*[:=])\s*[\"']?([^\s\"',;]+)")
+_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{12,}")
+_PRIVATE_KEY_BLOCK = re.compile(r"BEGIN [A-Z ]*PRIVATE KEY")
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:\(\))?")
+_NOT_A_VALUE = {"true", "false", "none", "null", "required", "incorrect", "invalid", "missing", "expired"}
+
+
+def _credential_like(value: str) -> bool:
+    """A value that could be a credential: not a code name, a keyword or a variable reference."""
+    value = value.strip().strip("\"'")
+    if len(value) < 6 or value.lower() in _NOT_A_VALUE:
+        return False
+    if value.startswith(("$", "{{", "<", "os.", "process.env")):
+        return False
+    return not (_IDENTIFIER.fullmatch(value) and not any(char.isdigit() for char in value))
+
+
+def has_secret_value(text: str) -> bool:
+    """A credential itself: a known token shape, a private key block, a bearer token, a labelled
+    value (`API_KEY=...`, `wachtwoord: ...`, "my password is ..."), or an unlabelled run of 32 or
+    more characters that mixes upper case, lower case and digits."""
     probe = normalize(text)
-    return bool(_EMAIL.search(probe) or _PHONE.search(probe) or _INTL_PHONE.search(probe))
+    if _TOKEN_SHAPES.search(probe) or _PRIVATE_KEY_BLOCK.search(probe) or _BEARER_VALUE.search(probe):
+        return True
+    for match in _SECRET_ASSIGNMENT.finditer(probe):
+        if _credential_like(re.split(r"[:=]", match.group(0), maxsplit=1)[1]):
+            return True
+    if any(_credential_like(match.group(1)) for match in _LABELLED_VALUE.finditer(probe)):
+        return True
+    return any(_mask_credential(match) == "[secret]" for match in _HIGH_ENTROPY.finditer(probe))
+
+
+# Stricter than the redaction rules, on purpose: a class that fires on an epoch timestamp or a
+# `git@github.com` URL turns an ordinary coding turn private. Redaction still masks those shapes
+# in whatever leaves; this only decides the class.
+_CONTACT_EMAIL = re.compile(
+    r"(?<![\w.%+-])(?!git@)[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}\b")
+_CONTACT_PHONE = re.compile(
+    r"(?<![\w+])(?:\+\d{1,3}[\s.-]?(?:\d[\s.-]?){7,13}\d"   # international, with a plus
+    r"|(?:\+31|0031|0)6[\s-]?\d{8}"                        # Dutch mobile
+    r"|0\d{1,3}[\s-]\d{6,8}"                               # Dutch landline, with its separator
+    r"|\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4})(?!\d)")          # North American, with separators
+
+
+def has_contact_details(text: str) -> bool:
+    """An email address or a phone number as a person writes one: data about a person."""
+    probe = _LONG_HEX.sub(" ", _TRACKING.sub(" ", normalize(text)))
+    return bool(_CONTACT_EMAIL.search(probe) or _CONTACT_PHONE.search(probe))
 
 
 # IBAN lengths per country, for the countries a Dutch household meets. The length is what keeps
