@@ -214,13 +214,30 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     if args.action == "check":
         return _out(dispatch.check_agents(policy))
     request = _stdin_json() if args.prompt is None else {"prompt": args.prompt}
+    if not isinstance(request, dict):
+        _out({"error": "invalid_request", "detail": "stdin must be one JSON object"})
+        return 2
+    messages = request.get("messages") if isinstance(request.get("messages"), list) else None
     prompt = str(request.get("prompt") or "")
+    if not prompt and messages:
+        # No prompt: the turn is the newest user message, as it is in the chat.
+        prompt = next((dispatch.relay.text_of(m.get("content")) for m in reversed(messages)
+                       if isinstance(m, dict) and m.get("role") == "user"), "")
+    if not prompt.strip():
+        _out({"error": "invalid_request", "detail": "no prompt and no user message"})
+        return 2
+    if messages is None:
+        messages = [{"role": "user", "content": prompt}]
+    elif not isinstance(messages[-1], dict) or messages[-1].get("role") != "user":
+        messages = [*messages, {"role": "user", "content": prompt}]     # the prompt is the new turn
     profile = args.profile or "default"
     if args.privacy:
-        policy = {**policy, "profiles": {**(policy.get("profiles") or {}), profile: args.privacy}}
-    messages = request.get("messages") or [{"role": "user", "content": prompt}]
+        # --privacy can only make a profile stricter, never looser.
+        current = dispatch.privacy_class("", profile=profile, policy=policy)[0]
+        policy = {**policy, "profiles": {**(policy.get("profiles") or {}),
+                                         profile: dispatch.stricter(current, args.privacy)}}
     return _out(dispatch.dispatch_turn(prompt, messages, profile=profile,
-                                       context_tokens=int(request.get("context_tokens") or 0),
+                                       context_tokens=dispatch._int(request.get("context_tokens")),
                                        interactive=not args.background, run=args.run, policy=policy))
 
 

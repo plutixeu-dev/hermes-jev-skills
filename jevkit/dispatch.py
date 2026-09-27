@@ -33,6 +33,14 @@ SIGNALS = tuple(f"G{n}" for n in range(1, 10))
 NIVEAUS = ("tiny", "fast", "standard", "max_lokaal", "frontier")
 PRIVACY = ("public", "private", "highly_sensitive")
 
+_RANK = {"public": 0, "private": 1, "highly_sensitive": 2}
+
+
+def stricter(first: str, second: str) -> str:
+    """The stricter of two privacy classes. Anything unknown counts as highly sensitive."""
+    return PRIVACY[max(_RANK.get(first, 2), _RANK.get(second, 2))]
+
+
 _TRIAGE_LINE = re.compile(r"^[ \t]*TRIAGE[ \t]+(\{.*)[ \t]*$", re.MULTILINE)
 
 
@@ -414,6 +422,12 @@ def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], 
     return record
 
 
+def _agent_limit(settings: Dict[str, Any]) -> float:
+    """An agent's own time limit: its `timeout`, or 600 s when that is missing, zero or negative."""
+    limit = float(_int(settings.get("timeout"), 600))
+    return limit if limit > 0 else 600.0
+
+
 def run_agent(chosen: Dict[str, Any], prompt: str, *, policy: Dict[str, Any], session: str = "",
               runners: Optional[Dict[str, Any]] = None, transport: Optional[Callable[..., bytes]] = None,
               timeout: Optional[float] = None) -> agents.Result:
@@ -423,8 +437,8 @@ def run_agent(chosen: Dict[str, Any], prompt: str, *, policy: Dict[str, Any], se
     """
     settings = (policy.get("agents") or {}).get(chosen["agent"]) or {}
     kind, model = settings.get("kind"), str(settings.get("model") or "")
-    limit = float(_int(settings.get("timeout"), 600) or 600)
-    timeout = min(limit, timeout) if timeout else limit
+    limit = _agent_limit(settings)
+    timeout = min(limit, timeout) if timeout is not None else limit
     runners = runners or {}
     if kind == "codex":
         return agents.run_codex(prompt, model=model, timeout=timeout, argv=settings.get("argv"),
@@ -442,6 +456,7 @@ def run_agent(chosen: Dict[str, Any], prompt: str, *, policy: Dict[str, Any], se
 # next turn does not wait out the same slow seat again. An odd failure cools nothing.
 _COOL_ON = ("quota", "auth", "missing")
 _BUDGET_FLOOR = 30.0                          # below this many seconds left, no agent is started
+_OWN_SHARE = 0.9          # a timeout is the agent's own when it had at least 90% of its own limit
 
 
 def _rung(name: str) -> str:
@@ -469,7 +484,7 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
     refuse = refuse or ladder.refuse
     clock = clock or time.monotonic
     started = clock()
-    budget = float(_int(policy.get("turn_budget"), 900))
+    budget = float(_int(policy.get("turn_budget"), 600))
     handoff = policy.get("handoff") or {}
     max_messages = _int(handoff.get("max_messages"), 6)
     leaving = relay.leaving_text(messages, request=text, max_messages=max_messages)
@@ -496,13 +511,13 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
         if prompt is None:
             return {**out, **_local("the conversation holds something that must not leave this machine",
                                     chosen["considered"], downgraded=True)}
-        if not run:
-            return {**out, **chosen, "would_send_chars": len(prompt)}
-        remaining = budget - (clock() - started)
+        remaining = min(budget, budget - (clock() - started))
         if remaining < _BUDGET_FLOOR:
             out["attempts"].append({"agent": chosen["agent"], "error": "budget",
                                     "detail": "the turn's time budget is spent"})
             break
+        if not run:
+            return {**out, **chosen, "would_send_chars": len(prompt)}
         try:
             result = run_agent(chosen, prompt, policy=policy, session=session, runners=runners,
                                transport=agent_transport, timeout=remaining)
@@ -513,7 +528,7 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
             if error.code in _COOL_ON:
                 refuse(_rung(chosen["agent"]), f"{error.code}: {error.detail}",
                        cooldown=float(_int(settings.get("cooldown"), 1800)))
-            elif error.code == "timeout":
+            elif error.code == "timeout" and remaining >= _OWN_SHARE * _agent_limit(settings):
                 refuse(_rung(chosen["agent"]), f"{error.code}: {error.detail}",
                        cooldown=float(_int(policy.get("timeout_cooldown"), 300)))
             continue

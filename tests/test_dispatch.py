@@ -621,6 +621,34 @@ class TurnTests(unittest.TestCase):
         self.assertEqual(out["agent"], "local")
         self.assertEqual(self.calls, [])
 
+    def test_shadow_honours_the_time_budget_as_live_does(self):
+        pol = live_policy(openai=ON)
+        pol["turn_budget"] = 10
+        out = self.turn(pol, run=False)
+        self.assertEqual((out["agent"], out["attempts"][-1]["error"]), ("local", "budget"))
+
+    def test_a_negative_agent_timeout_means_the_default(self):
+        pol = live_policy(openai={"enabled": True, "timeout": -1})
+        seen = []
+
+        def run(argv, stdin_text, timeout):
+            seen.append(timeout)
+            Path(argv[argv.index("--output-last-message") + 1]).write_text("ok", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        self.turn(pol, runners={"codex": run})
+        self.assertGreater(seen[0], 30)
+
+    def test_a_timeout_the_budget_caused_does_not_cool_the_seat(self):
+        pol = live_policy(openai=ON)
+        pol["turn_budget"] = 100
+
+        def slow(argv, stdin_text, timeout):
+            raise subprocess.TimeoutExpired("codex", timeout)
+
+        self.turn(pol, runners={"codex": slow}, clock=lambda: 0.0)
+        self.assertEqual(self.refused, [])
+
 
 class CheckAgentsTests(unittest.TestCase):
     def test_it_reports_without_running_anything(self):
@@ -660,6 +688,45 @@ class CliTests(unittest.TestCase):
             code, out = self.run_cli("dispatch", "check")
         self.assertEqual(code, 0)
         self.assertEqual(set(out["agents"]), {"openai", "claude", "openrouter"})
+
+    def run_stdin(self, payload, *argv, policy=None):
+        buffer = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"JEV_LADDER_STATE": str(Path(tmp) / "ladder.json")}), \
+                mock.patch.object(cli.dispatch, "load_policy", return_value=policy or dispatch.load_policy(NOWHERE)), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(buffer):
+            code = cli.main(["dispatch", *argv])
+        return code, json.loads(buffer.getvalue())
+
+    def test_without_a_prompt_the_turn_is_the_newest_user_message(self):
+        code, out = self.run_stdin({"messages": [{"role": "user", "content": "Vat het dossier samen"}]},
+                                   "--privacy", "private")
+        self.assertEqual((code, out["privacy"], out["agent"]), (0, "highly_sensitive", "local"))
+
+    def test_privacy_on_the_command_line_only_ever_tightens(self):
+        strict = dispatch.load_policy(NOWHERE)
+        strict["profiles"] = {"default": "highly_sensitive"}
+        with mock.patch.object(cli.dispatch, "load_policy", return_value=strict), \
+                contextlib.redirect_stdout(io.StringIO()) as buffer:
+            cli.main(["dispatch", "--prompt", "Leg uit wat een bind mount is", "--privacy", "public"])
+        self.assertEqual(json.loads(buffer.getvalue())["privacy"], "highly_sensitive")
+
+    def test_input_that_is_not_an_object_is_an_error_answer(self):
+        code, out = self.run_stdin([1, 2])
+        self.assertEqual((code, out["error"]), (2, "invalid_request"))
+
+    def test_a_history_ending_in_a_reply_gets_the_prompt_as_its_new_turn(self):
+        pol = dispatch.load_policy(NOWHERE)
+        pol["profiles"] = {"default": "private"}
+        pol["agents"]["openai"]["enabled"] = True
+        frontier = {"type": "CHANGE", "exit": "ESCALATE", "signals": ["G8"], "niveau": "frontier",
+                    "privacy": "private", "context_tokens": 0, "repo_werk": False, "interactief": True,
+                    "reason": "hard work", "source": "jev"}
+        with mock.patch.object(cli.dispatch, "classify_with_jev", return_value=frontier):
+            code, out = self.run_stdin({"prompt": "Find the race", "messages": [
+                {"role": "user", "content": "Kijk naar de scheduler"}, {"role": "assistant", "content": "Welke?"}]},
+                policy=pol)
+        self.assertEqual((out["agent"], out["would_send_chars"] > 0), ("openai", True))
 
 
 AWS_LIKE = "wJalrXUtnFEMI" + "/K7MDENG/bPxRfiCY" + "EXAMPLEKEY"    # built at runtime: no key shape in the source
