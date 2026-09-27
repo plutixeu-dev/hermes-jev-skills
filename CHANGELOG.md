@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+**Receptionist dispatch: a hard turn goes to the agent that should answer it**
+
+- New `hermes-dispatch` plugin (off by default) and `jev dispatch`. On the first provider call of a turn, `llm_execution` middleware classifies the turn with Jev, applies a deterministic policy (privacy class, level, context window, cooldowns, order), and either lets the local call go ahead or hands the turn to Codex on a ChatGPT login, Claude Code, or OpenRouter. The answer comes back unchanged under one line naming its author. Shadow mode decides and logs only. A quota, auth or missing-program failure cools that agent for every lane through the ladder, under its own `dispatch:<agent>` name. A timeout cools it for five minutes. Then the next agent or the local model answers. A turn spends at most `turn_budget` (10 minutes) on agents. The privacy class covers every turn a handoff would carry, not only the newest. Agents run in an empty directory with a minimal environment, and claude runs without file, shell or web tools. A failure's detail never carries output text.
+- `route.judge_answers`, `route.clip_ask` and `route.is_risky` are extracted from `route.decide` with no change in behaviour, so routing and dispatch share one calibrated judgement.
+- Privacy for dispatch:
+  - `privacy.has_secret_value` asks whether a credential value is present, not a word about one.
+  - `privacy.has_iban` finds an IBAN from the whole registry by its check digits, grouped or not.
+  - Dutch mobile numbers in every usual spelling are now masked by `redact` as well.
+  - `privacy.has_contact_details` reads addresses and phone numbers as people write them, not timestamps or git URLs.
+  - Sensitive terms count in any form.
+  - `dispatch.json` values of the wrong type are ignored; `"enabled": "false"` is not a yes.
+  - One string where a list is expected is a list of one; an `argv` string is split like a command line.
+  - A turn with words about secrets sends Jev coarse features only, as routing does. So do routing's `mode: "features"` and `private_profiles`.
+  - OpenRouter takes public turns only, by kind, whatever it is named.
+  - A broken setting in a later file makes things stricter: a broken `enabled` is a no, and a broken privacy list allows nothing.
+- The TRIAGE record follows the reasoning library's routing contract, so a local receptionist can later take Jev's place as the classifier (one classifier per turn).
+- `tests/test_turn.py` and `tests/test_question_shape.py` no longer depend on a real key being installed.
+
 **Context-filter selection regret evaluation and effective middleware routing telemetry**
 
 - Added `evals/context-filter/regret.py` for offline human-labelled, actual-result JSONL comparisons against the unfiltered top-k baseline. Reports needed passages missed, poisoned passages selected, unjudged/clipped selections and incomplete Jev coverage; this is not live recall regret. Tests include real rerank logic with a fake transport; no corpus is shipped.
