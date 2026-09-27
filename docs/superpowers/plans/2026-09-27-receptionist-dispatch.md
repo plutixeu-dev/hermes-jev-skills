@@ -38,6 +38,16 @@ Dit plan bouwt de "receptie" uit het gesprek van 24 t/m 27 september.
 | Decision log and dashboard | `logs/jev-decisions.jsonl` | `kind: "dispatch"` rows (no prompt text) |
 | Replacing the provider call | Hermes `llm_execution` middleware | `hermes-dispatch` plugin |
 
+## Changes after the review of Tasks 0-2
+
+The first batch was implemented and reviewed. These plan changes came out of it, and later tasks already include them:
+- **Task 1:** the TRIAGE line may lack its closing brace, so a broken line is reported as invalid JSON rather than as missing. This is the only deviation from the plan's code.
+- **Task 2b** (new): sensitive terms count in any form (plurals, compounds), an IBAN from any common country is found by its check digits, and the English verb "diagnose" no longer counts.
+- **Task 3:** dict settings merge one level deep, a bad number in `dispatch.json` counts as the default, and `turn_budget` and `timeout_cooldown` are added.
+- **Task 8:** `leaving_text` gives the privacy check everything a handoff would carry.
+- **Task 9:** the privacy class covers the history too, a turn has a time budget, and a timeout cools the agent for five minutes.
+- **Task 11:** the plugin reads its own settings from config.yaml, sees hermes-jev routing switched on in config.yaml as well (one classifier per turn), bounds its session map, and still loads on a Hermes without `llm_execution`.
+
 ## Before production (D0, on the machine that runs Hermes; not part of the code tasks)
 
 Run these and keep the output. Every one is read-only apart from one short prompt per login.
@@ -223,7 +233,7 @@ SIGNALS = tuple(f"G{n}" for n in range(1, 10))
 NIVEAUS = ("tiny", "fast", "standard", "max_lokaal", "frontier")
 PRIVACY = ("public", "private", "highly_sensitive")
 
-_TRIAGE_LINE = re.compile(r"^[ \t]*TRIAGE[ \t]+(\{.*\})[ \t]*$", re.MULTILINE)
+_TRIAGE_LINE = re.compile(r"^[ \t]*TRIAGE[ \t]+(\{.*)[ \t]*$", re.MULTILINE)
 
 
 def check_triage(record: Any) -> List[str]:
@@ -405,6 +415,121 @@ git commit -m "dispatch: privacy class per turn, the stricter of profile and tex
 
 ---
 
+### Task 2b: Terms in any form, and any IBAN (review finding on Task 2)
+
+Task 2 matched whole words only, so "gespreksverslagen", "dossiers", "patiëntendossier" and "zorgdossier" all counted as public. Its IBAN rule only knew Dutch IBANs in capitals. And "diagnose" is the English verb of every debugging chat: a gate that fires on it gets switched off, so it leaves the default list. The Dutch clinical words stay.
+
+**Files:**
+- Modify: `jevkit/privacy.py` (add `_IBAN_LENGTHS`, `_IBAN_START`, `has_iban` after `has_contact_details`)
+- Modify: `jevkit/dispatch.py` (new `DEFAULT_SENSITIVE_TERMS`, `_mentions`; `privacy_class` uses both and `privacy.has_iban`; remove `_IBAN`)
+- Test: `tests/test_dispatch.py`
+
+- [ ] **Step 1: Write the failing tests** (append)
+
+```python
+class PrivacyTermTests(unittest.TestCase):
+    def klass(self, text):
+        return dispatch.privacy_class(text, profile="coding", policy=POLICY)[0]
+
+    def test_plurals_and_compounds_count(self):
+        for text in ("Vat de gespreksverslagen samen", "Sorteer de dossiers", "Open het patiëntendossier",
+                     "Wat staat er in het zorgdossier?", "Maak een behandelplan"):
+            self.assertEqual(self.klass(text), "highly_sensitive", text)
+
+    def test_the_english_verb_diagnose_is_an_ordinary_debugging_word(self):
+        self.assertEqual(self.klass("Help me diagnose why the build fails"), "public")
+
+    def test_a_short_term_counts_as_a_whole_word_only(self):
+        self.assertEqual(self.klass("Zet het BSN-nummer in het formulier"), "highly_sensitive")
+        self.assertEqual(self.klass("Rename the absnt flag"), "public")
+
+    def test_an_iban_from_any_country_in_any_case(self):
+        for text in ("Maak over naar BE71 0961 2345 6769", "rekening nl91 abna 0417 1643 00 graag",
+                     "DE89370400440532013000", "GB82 WEST 1234 5698 7654 32"):
+            self.assertEqual(self.klass(text), "highly_sensitive", text)
+
+    def test_a_code_that_only_looks_like_an_iban_is_not_one(self):
+        self.assertFalse(dispatch.privacy.has_iban("NL12 ABNA 0417 1643 00"))
+        self.assertFalse(dispatch.privacy.has_iban("Libanon, AB12 CDEF, DE12 3456"))
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `python3 -m unittest tests.test_dispatch.PrivacyTermTests -v`
+Expected: failures on plurals, "diagnose" and the IBANs, and `AttributeError` for `has_iban`.
+
+- [ ] **Step 3: Add `has_iban` to `jevkit/privacy.py`** (after `has_contact_details`)
+
+```python
+# IBAN lengths per country, for the countries a Dutch household meets. The length is what keeps
+# the next word out of the number when an IBAN is written in groups of four.
+_IBAN_LENGTHS = {"AD": 24, "AT": 20, "BE": 16, "BG": 22, "CH": 21, "CY": 28, "CZ": 24, "DE": 22, "DK": 18,
+                 "EE": 20, "ES": 24, "FI": 18, "FR": 27, "GB": 22, "GI": 23, "GR": 27, "HR": 21, "HU": 28,
+                 "IE": 22, "IS": 26, "IT": 27, "LI": 21, "LT": 20, "LU": 20, "LV": 21, "MC": 27, "MT": 31,
+                 "NL": 18, "NO": 15, "PL": 28, "PT": 25, "RO": 24, "SE": 24, "SI": 19, "SK": 24, "SM": 27}
+_IBAN_START = re.compile(r"\b([A-Z]{2})(\d{2})")
+
+
+def has_iban(text: str) -> bool:
+    """An IBAN from one of those countries, grouped or not, in any case.
+
+    The check digits decide, as Luhn does for cards: a code that merely looks like an IBAN
+    almost never passes mod 97.
+    """
+    probe = normalize(text).upper()
+    for match in _IBAN_START.finditer(probe):
+        length = _IBAN_LENGTHS.get(match.group(1))
+        if not length:
+            continue
+        compact = probe[match.start():match.start() + length + length // 4 + 2].replace(" ", "")[:length]
+        if len(compact) != length or not (compact.isascii() and compact.isalnum()):
+            continue
+        rearranged = compact[4:] + compact[:4]
+        if int("".join(str(int(char, 36)) for char in rearranged)) % 97 == 1:
+            return True
+    return False
+```
+
+- [ ] **Step 4: Change `jevkit/dispatch.py`**
+
+Replace `DEFAULT_SENSITIVE_TERMS` and `_IBAN` with:
+
+```python
+# Words that put someone else's health, money, record or file into the turn. They make a turn
+# highly sensitive: only this machine may answer it. A long term counts anywhere, so plurals and
+# compounds do too ("dossiers", "zorgdossier"); a short one only as a whole word. Deliberately
+# not "client", "token" or "diagnose": in a coding chat those are ordinary words, and a gate that
+# fires on every other coding turn gets switched off. dispatch.json can add terms
+# (`sensitive_terms`); it never removes these.
+DEFAULT_SENSITIVE_TERMS = (
+    "cliënt", "patiënt", "dossier", "gespreksverslag", "behandelplan", "anamnese", "medicatie",
+    "strafblad", "schulden", "burgerservicenummer", "bsn", "iban",
+)
+
+
+def _mentions(lowered: str, term: str) -> bool:
+    term = term.lower()
+    if len(term) >= 6:
+        return term in lowered
+    return re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", lowered) is not None
+```
+
+In `privacy_class`, make the term loop `if _mentions(lowered, str(term)):` and replace `if _IBAN.search(probe):` with `if privacy.has_iban(probe):`.
+
+- [ ] **Step 5: Run the tests**
+
+Run: `python3 -m unittest tests.test_dispatch -v`
+Expected: all pass. The Task 2 tests still pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add jevkit/privacy.py jevkit/dispatch.py tests/test_dispatch.py
+git commit -m "dispatch: sensitive terms in any form, any IBAN by its check digits"
+```
+
+---
+
 ### Task 3: The policy file and the route choice
 
 **Files:**
@@ -488,6 +613,10 @@ class ChooseRouteTests(unittest.TestCase):
     def test_max_lokaal_in_the_chat_is_answered_here_now(self):
         self.assertEqual(self.route(triage(niveau="max_lokaal"), policy(openai=ON))["agent"], "local")
 
+    def test_a_window_that_is_not_a_number_is_ignored(self):
+        pol = policy(openai={"enabled": True, "context_tokens": "veel"})
+        self.assertEqual(self.route(triage(), pol)["agent"], "openai")
+
 
 class PolicyFileTests(unittest.TestCase):
     def test_a_file_overrides_one_agent_setting_and_keeps_the_rest(self):
@@ -499,6 +628,13 @@ class PolicyFileTests(unittest.TestCase):
         self.assertEqual(loaded["profiles"], {"default": "private"})
         self.assertEqual((loaded["agents"]["openai"]["model"], loaded["agents"]["openai"]["kind"]), ("gpt-6-sol", "codex"))
         self.assertIn("claude", loaded["agents"])
+
+    def test_changing_one_order_keeps_the_other(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dispatch.json"
+            path.write_text(json.dumps({"frontier_order": {"default": ["claude"]}}))
+            loaded = dispatch.load_policy(path)
+        self.assertEqual(loaded["frontier_order"], {"repo": ["claude", "openai"], "default": ["claude"]})
 
     def test_a_broken_file_leaves_the_defaults(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -563,6 +699,8 @@ DEFAULT_POLICY: Dict[str, Any] = {
                        "timeout": 120, "cooldown": 600, "context_tokens": 0},
     },
     "handoff": {"max_messages": 6, "max_chars": 12000},
+    "turn_budget": 900,                       # seconds one turn may spend on agents before this machine answers
+    "timeout_cooldown": 300,                  # an agent that timed out is skipped this long, not the full cooldown
     "skip_prefixes": ["[kanban]", "[SESSION HANDOFF"],
     "skip_platforms": ["cron"],
 }
@@ -597,8 +735,23 @@ def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
             for name, settings in agents.items():
                 if isinstance(settings, dict):
                     policy["agents"][name] = {**policy["agents"].get(name, {}), **settings}
-        policy.update({key: value for key, value in layer.items() if key != "agents"})
+        for key, value in layer.items():
+            if key == "agents":
+                continue
+            # One level deep, so a file that changes one order or one profile keeps the others.
+            if isinstance(value, dict) and isinstance(policy.get(key), dict):
+                policy[key] = {**policy[key], **value}
+            else:
+                policy[key] = value
     return policy
+
+
+def _int(value: Any, default: int = 0) -> int:
+    """A number from a hand-edited file. Anything that is not one counts as the default."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def _local(reason: str, considered: List[Dict[str, Any]], downgraded: bool = False) -> Dict[str, Any]:
@@ -621,8 +774,8 @@ def _skip(name: str, agent: Dict[str, Any], triage: Dict[str, Any], klass: str, 
         return "only for repository work"
     if agent.get("kind") == "openrouter" and not agent.get("model"):
         return "no model configured"
-    window = int(agent.get("context_tokens") or 0)
-    if window and int(triage.get("context_tokens") or 0) * 1.25 > window:
+    window = _int(agent.get("context_tokens"))
+    if window and _int(triage.get("context_tokens")) * 1.25 > window:
         return "the conversation does not fit its context window"
     left = cooling(name)
     if left > 0:
@@ -1468,6 +1621,14 @@ class HandoffTests(unittest.TestCase):
         text = relay.build_handoff(chat, agent="openai", reason="r", request="Versie 2.")
         self.assertNotIn("skill suggestion", text)
 
+    def test_what_would_leave_is_the_request_and_the_bounded_history(self):
+        text = relay.leaving_text(CHAT, max_messages=2)
+        self.assertIn("Welke versie draai je?", text)
+        self.assertIn("Mijn scheduler loopt vast.", text)
+        self.assertNotIn("SYSTEMPROMPT", text)
+        self.assertNotIn("TOOLOUTPUT", text)
+        self.assertNotIn("Mijn scheduler", relay.leaving_text(CHAT, max_messages=1))
+
     def test_images_are_seen(self):
         chat = [{"role": "user", "content": [{"type": "text", "text": "Wat staat hier?"},
                                              {"type": "image_url", "image_url": {"url": "data:..."}}]}]
@@ -1537,6 +1698,26 @@ def has_images(messages: Sequence[Dict[str, Any]]) -> bool:
     return False
 
 
+def _turns(messages: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The user and assistant messages that have text: all a handoff can ever carry."""
+    return [m for m in messages if isinstance(m, dict) and m.get("role") in ("user", "assistant")
+            and text_of(m.get("content")).strip()]
+
+
+def leaving_text(messages: Sequence[Dict[str, Any]], *, request: Optional[str] = None,
+                 max_messages: int = 6) -> str:
+    """Everything a handoff of these messages would carry, as one text: what the privacy check reads.
+
+    Checking only the newest message let an earlier one about a client file leave as history.
+    """
+    turns = _turns(messages)
+    if not turns or turns[-1].get("role") != "user":
+        return request or ""
+    asked = request if request is not None else text_of(turns[-1]["content"])
+    earlier = turns[-(max_messages + 1):-1] if max_messages > 0 else []
+    return "\n".join([asked] + [text_of(m.get("content")) for m in earlier])
+
+
 def build_handoff(messages: Sequence[Dict[str, Any]], *, agent: str, reason: str, request: Optional[str] = None,
                   external: bool = True, max_messages: int = 6, max_chars: int = 12000) -> Optional[str]:
     """The task text for one agent, or None when nothing may be sent.
@@ -1544,8 +1725,7 @@ def build_handoff(messages: Sequence[Dict[str, Any]], *, agent: str, reason: str
     `request`, when given, is the person's own words for this turn: what plugins appended to the
     user message (a skill suggestion, a handoff capsule) is then left behind.
     """
-    turns = [m for m in messages if isinstance(m, dict) and m.get("role") in ("user", "assistant")
-             and text_of(m.get("content")).strip()]
+    turns = _turns(messages)
     if not turns or turns[-1].get("role") != "user":
         return None
     asked = (request if request is not None else text_of(turns[-1]["content"])).strip()
@@ -1635,10 +1815,11 @@ class TurnTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, body, "")
         return run
 
-    def turn(self, pol, answers_=HARD_GENERAL, chat=CHAT, text=None, run=True, runners=None):
+    def turn(self, pol, answers_=HARD_GENERAL, chat=CHAT, text=None, run=True, runners=None, clock=None):
         return dispatch.dispatch_turn(text or chat[-1]["content"], chat, profile="default", run=run, policy=pol,
                                       config=dispatch.route.load_config(NOWHERE), answers=answers_,
-                                      runners=runners or {}, cooling=NOT_COOLING, refuse=self.refuse)
+                                      runners=runners or {}, cooling=NOT_COOLING, refuse=self.refuse,
+                                      clock=clock)
 
     def test_shadow_decides_and_hands_nothing_over(self):
         out = self.turn(live_policy(openai=ON), run=False, runners={"codex": self.runner("codex")})
@@ -1662,7 +1843,7 @@ class TurnTests(unittest.TestCase):
         self.assertEqual(out["attempts"][0]["error"], "quota")
         self.assertEqual(out["session"], "s-9")
 
-    def test_a_timeout_does_not_cool_the_seat(self):
+    def test_a_timeout_cools_the_seat_briefly(self):
         pol = live_policy(openai=ON)
 
         def slow(argv, stdin_text, timeout):
@@ -1670,7 +1851,38 @@ class TurnTests(unittest.TestCase):
 
         out = self.turn(pol, runners={"codex": slow})
         self.assertEqual((out["agent"], out["downgraded"]), ("local", True))
-        self.assertEqual(self.refused, [])
+        self.assertEqual(self.refused, [("openai", "timeout", 300.0)])
+
+    def test_the_time_budget_stops_the_next_attempt(self):
+        pol = live_policy(openai=ON, claude={"enabled": True, "only_repo": False})
+        pol["turn_budget"] = 100
+        ticks = iter([0.0, 0.0, 95.0, 95.0, 95.0])        # start, before openai, before claude, spare
+        out = self.turn(pol, runners={"codex": self.runner("codex", error="usage limit"),
+                                      "claude": self.runner("claude")}, clock=lambda: next(ticks))
+        self.assertEqual(self.calls, ["codex"])
+        self.assertEqual((out["agent"], out["attempts"][-1]["error"]), ("local", "budget"))
+
+    def test_an_agent_gets_no_more_time_than_the_turn_has_left(self):
+        pol = live_policy(openai=ON)
+        pol["turn_budget"] = 100
+        seen = []
+
+        def run(argv, stdin_text, timeout):
+            seen.append(timeout)
+            Path(argv[argv.index("--output-last-message") + 1]).write_text("ok", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        ticks = iter([0.0, 40.0, 40.0])
+        self.turn(pol, runners={"codex": run}, clock=lambda: next(ticks))
+        self.assertEqual(seen, [60.0])
+
+    def test_an_earlier_turn_about_a_client_file_keeps_the_turn_here(self):
+        chat = [{"role": "user", "content": "Hier is het dossier van mijn cliënt."},
+                {"role": "assistant", "content": "Ik heb het gelezen."},
+                {"role": "user", "content": "Find the race in the scheduler"}]
+        out = self.turn(live_policy(openai=ON), chat=chat, runners={"codex": self.runner("codex")})
+        self.assertEqual((out["agent"], out["privacy"]), ("local", "highly_sensitive"))
+        self.assertEqual(self.calls, [])
 
     def test_every_agent_failing_answers_here(self):
         pol = live_policy(openai=ON, claude={"enabled": True, "only_repo": False})
@@ -1720,16 +1932,20 @@ Expected: `AttributeError: ... 'dispatch_turn'`.
 
 - [ ] **Step 3: Add to `jevkit/dispatch.py`**
 
-Add `import shutil` and change the jevkit import to `from . import agents, client, keystore, ladder, privacy, relay, route`, then append:
+Add `import shutil` and `import time`, and change the jevkit import to `from . import agents, client, keystore, ladder, privacy, relay, route`. Then append:
 
 ```python
 def run_agent(chosen: Dict[str, Any], prompt: str, *, policy: Dict[str, Any], session: str = "",
-              runners: Optional[Dict[str, Any]] = None,
-              transport: Optional[Callable[..., bytes]] = None) -> agents.Result:
-    """Hand one prompt to the agent a route named. Raises agents.AgentError."""
+              runners: Optional[Dict[str, Any]] = None, transport: Optional[Callable[..., bytes]] = None,
+              timeout: Optional[float] = None) -> agents.Result:
+    """Hand one prompt to the agent a route named, within its own time limit or `timeout` if shorter.
+
+    Raises agents.AgentError.
+    """
     settings = (policy.get("agents") or {}).get(chosen["agent"]) or {}
     kind, model = settings.get("kind"), str(settings.get("model") or "")
-    timeout = float(settings.get("timeout") or 600)
+    limit = float(_int(settings.get("timeout"), 600) or 600)
+    timeout = min(limit, timeout) if timeout else limit
     runners = runners or {}
     if kind == "codex":
         return agents.run_codex(prompt, model=model, timeout=timeout, argv=settings.get("argv"),
@@ -1742,9 +1958,11 @@ def run_agent(chosen: Dict[str, Any], prompt: str, *, policy: Dict[str, Any], se
     raise agents.AgentError("failed", f"unknown agent kind {kind!r}")
 
 
-# Failures that will not fix themselves by the next turn: cool the agent, so no lane retries it
-# on every message. A timeout or an odd failure is no reason to shut a seat for half an hour.
+# Failures that will not fix themselves by the next turn: cool the agent for its full cooldown,
+# so no lane retries it on every message. A timeout cools it briefly (`timeout_cooldown`), so the
+# next turn does not wait out the same slow seat again. An odd failure cools nothing.
 _COOL_ON = ("quota", "auth", "missing")
+_BUDGET_FLOOR = 30.0                          # below this many seconds left, no agent is started
 
 
 def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Optional[str] = "default",
@@ -1753,16 +1971,24 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
                   transport: Optional[client.Transport] = None,
                   agent_transport: Optional[Callable[..., bytes]] = None,
                   runners: Optional[Dict[str, Any]] = None, cooling: Optional[Callable[[str], float]] = None,
-                  refuse: Optional[Callable[..., Any]] = None,
-                  answers: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                  refuse: Optional[Callable[..., Any]] = None, answers: Optional[Dict[str, Any]] = None,
+                  clock: Optional[Callable[[], float]] = None) -> Dict[str, Any]:
     """One fresh user turn, start to finish. `agent` is "local" whenever this machine answers.
 
-    With run=False (shadow) it decides and reports what it would send, and hands nothing over.
+    The privacy class is read over everything a handoff would carry (the request and the recent
+    history), not the newest message alone. With run=False (shadow) it decides and reports what
+    it would send, and hands nothing over. `turn_budget` bounds the time spent on agents.
     """
     policy = policy or load_policy()
     cooling = cooling or ladder.cooling
     refuse = refuse or ladder.refuse
-    klass, why = privacy_class(text, profile=profile, policy=policy)
+    clock = clock or time.monotonic
+    started = clock()
+    budget = float(_int(policy.get("turn_budget"), 900))
+    handoff = policy.get("handoff") or {}
+    max_messages = _int(handoff.get("max_messages"), 6)
+    leaving = relay.leaving_text(messages, request=text, max_messages=max_messages)
+    klass, why = privacy_class(leaving or text, profile=profile, policy=policy)
     triage = classify_with_jev(text, privacy_class=klass, policy=policy, context_tokens=context_tokens,
                                interactive=interactive, config=config, transport=transport, answers=answers)
     out: Dict[str, Any] = {"privacy": klass, "privacy_why": why, "jev": triage.get("jev"),
@@ -1770,7 +1996,6 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
     if relay.has_images(messages):
         return {**out, **_local("the turn carries an image; a handed-off turn is text only for now", [],
                                 downgraded=triage.get("niveau") == "frontier")}
-    handoff = policy.get("handoff") or {}
     failed: Dict[str, str] = {}
     for _ in range(len(policy.get("agents") or {}) + 1):
         chosen = choose_route(triage, policy, cooling=lambda name: 1e9 if name in failed else cooling(name))
@@ -1778,27 +2003,36 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
             return {**out, **chosen, "downgraded": chosen["downgraded"] or bool(failed)}
         prompt = relay.build_handoff(messages, agent=chosen["agent"], request=text,
                                      reason=str(triage.get("reason") or triage.get("why") or "frontier work"),
-                                     max_messages=int(handoff.get("max_messages", 6)),
-                                     max_chars=int(handoff.get("max_chars", 12000)))
+                                     max_messages=max_messages, max_chars=_int(handoff.get("max_chars"), 12000))
         if prompt is None:
             return {**out, **_local("the conversation holds something that must not leave this machine",
                                     chosen["considered"], downgraded=True)}
         if not run:
             return {**out, **chosen, "would_send_chars": len(prompt)}
+        remaining = budget - (clock() - started)
+        if remaining < _BUDGET_FLOOR:
+            out["attempts"].append({"agent": chosen["agent"], "error": "budget",
+                                    "detail": "the turn's time budget is spent"})
+            break
         try:
             result = run_agent(chosen, prompt, policy=policy, session=session, runners=runners,
-                               transport=agent_transport)
+                               transport=agent_transport, timeout=remaining)
         except agents.AgentError as error:
             out["attempts"].append({"agent": chosen["agent"], "error": error.code, "detail": error.detail})
             failed[chosen["agent"]] = error.code
+            settings = (policy.get("agents") or {}).get(chosen["agent"]) or {}
             if error.code in _COOL_ON:
-                settings = (policy.get("agents") or {}).get(chosen["agent"]) or {}
-                refuse(chosen["agent"], f"{error.code}: {error.detail}", cooldown=float(settings.get("cooldown") or 1800))
+                refuse(chosen["agent"], f"{error.code}: {error.detail}",
+                       cooldown=float(_int(settings.get("cooldown"), 1800)))
+            elif error.code == "timeout":
+                refuse(chosen["agent"], f"{error.code}: {error.detail}",
+                       cooldown=float(_int(policy.get("timeout_cooldown"), 300)))
             continue
         model = result.model or chosen["model"]
         return {**out, **chosen, "model": model, "session": result.session,
                 "text": relay.relay(result.text, agent=chosen["agent"], model=model)}
-    return {**out, **_local("every agent that may take this turn failed; this machine answers", [], downgraded=True)}
+    return {**out, **_local("no agent answered in time, or every one that may take this turn failed; "
+                            "this machine answers", [], downgraded=True)}
 
 
 def check_agents(policy: Dict[str, Any], *, which: Optional[Callable[[str], Optional[str]]] = None,
@@ -1982,6 +2216,7 @@ class MiddlewareTests(unittest.TestCase):
 
         for patch in (mock.patch.dict(os.environ, {"HERMES_HOME": self.home.name}),
                       mock.patch.object(plugin, "_log", self.logs.append),
+                      mock.patch.object(plugin, "_hermes_jev_routing", return_value=None),   # never a real config.yaml
                       mock.patch.object(plugin.dispatch, "load_policy", lambda *a, **k: self.policy),
                       mock.patch.object(plugin.dispatch, "dispatch_turn", side_effect=fake_turn)):
             patch.start()
@@ -2075,6 +2310,26 @@ class MiddlewareTests(unittest.TestCase):
         self.call(turn="t2")
         self.assertEqual(self.dispatched[1]["session"], "sess-7")
 
+    def test_routing_switched_on_in_config_yaml_also_counts(self):
+        self.mode("on")
+        with mock.patch.object(plugin, "_hermes_jev_routing", return_value="on"):
+            result, following = self.call()
+        self.assertEqual((result, following.calls, self.dispatched), ("LOCAL-RESPONSE", 1, []))
+
+    def test_config_yaml_sets_the_mode_when_no_switch_was_used(self):
+        self.mode("off")
+        with mock.patch.object(plugin, "_plugin_setting", lambda name: "on" if name == "mode" else None):
+            result, following = self.call()
+        self.assertEqual(following.calls, 0)
+
+    def test_agent_sessions_are_bounded(self):
+        self.mode("on")
+        self.answer = {**self.answer, "agent": "claude", "session": "sess"}
+        with mock.patch.object(plugin, "_MAX_SESSIONS", 2):
+            for index in range(3):
+                self.call(session=f"s{index}")
+        self.assertEqual(len(plugin._SESSIONS), 2)
+
 
 class CommandTests(unittest.TestCase):
     def setUp(self):
@@ -2158,6 +2413,7 @@ _LOCK = threading.Lock()
 _TURNS: Dict[str, Dict[str, Any]] = {}      # session -> this turn's text and decision
 _SESSIONS: Dict[str, str] = {}              # Hermes session -> the agent session that continues it
 _MAX_SESSIONS = 256
+_CTX: Any = None
 
 
 def _home() -> Path:
@@ -2186,18 +2442,58 @@ def _state_path() -> Path:
     return _home() / "jev" / "dispatch-state.json"
 
 
+def _plugin_setting(name: str) -> Any:
+    """This plugin's own setting in config.yaml (`plugins.entries.hermes-dispatch.settings`), or None."""
+    if _CTX is None:
+        return None
+    try:
+        return _CTX.get_config(name, None)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _setting(name: str, policy: Dict[str, Any], default: str) -> str:
-    """A `/dispatch` switch wins over dispatch.json."""
+    """A `/dispatch` switch wins, then config.yaml, then dispatch.json, then the default."""
     value = _read(_state_path()).get(name)
+    if value is None:
+        value = _plugin_setting(name)
     if value is None:
         value = policy.get(name)
     return str(value if value is not None else default).lower()
 
 
+def _hermes_jev_routing() -> Any:
+    """hermes-jev's `routing` in config.yaml, where Hermes keeps plugin settings, or None."""
+    try:
+        from hermes_cli.config import load_config_readonly  # type: ignore
+
+        config = load_config_readonly() or {}
+        entry = config.get("plugins", {}).get("entries", {}).get("hermes-jev", {})
+        for section in ("settings", "config"):             # `config` is Hermes's legacy spelling
+            value = (entry.get(section) or {}).get("routing")
+            if value is not None:
+                return value
+    except Exception:  # noqa: BLE001 - outside Hermes, or a config shaped some other way
+        return None
+    return None
+
+
 def _jev_routing_active() -> bool:
-    """hermes-jev's `/jev routing` switch: the shared file, then this profile's own."""
+    """hermes-jev's routing, read the way that plugin reads it: a `/jev` switch, then config.yaml."""
     state = {**_read(_root() / "jev" / "state.json"), **_read(_home() / "jev" / "state.json")}
-    return str(state.get("routing", "off")).lower() in ("on", "shadow")
+    value = state.get("routing")
+    if value is None:
+        value = _hermes_jev_routing()
+    return str(value or "off").lower() in ("on", "shadow")
+
+
+def _middleware_available() -> bool:
+    """Does this Hermes have the execution middleware dispatch needs."""
+    try:
+        from hermes_cli.middleware import LLM_EXECUTION_MIDDLEWARE  # type: ignore  # noqa: F401
+    except Exception:  # noqa: BLE001
+        return False
+    return True
 
 
 def _log(entry: Dict[str, Any]) -> None:
@@ -2277,6 +2573,8 @@ def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: st
     if live and decision.get("agent") != dispatch.LOCAL and decision.get("text"):
         if decision.get("session"):
             with _LOCK:
+                if key not in _SESSIONS and len(_SESSIONS) >= _MAX_SESSIONS:
+                    _SESSIONS.pop(next(iter(_SESSIONS)))
                 _SESSIONS[key] = str(decision["session"])
         return _completion(str(decision["text"]), str(decision.get("model") or decision["agent"]))
     return next_call(request)
@@ -2316,6 +2614,8 @@ def _dispatch_command(raw_args: str = "") -> str:
     klass = (policy.get("profiles") or {}).get(_profile()) or policy.get("default_privacy")
     lines = [f"dispatch: {_setting('mode', policy, 'off')} · notice: {_setting('notice', policy, 'off')} · "
              f"profile {_profile()} is {klass}"]
+    if not _middleware_available():
+        lines.append("  this Hermes has no llm_execution middleware: dispatch cannot act here; update Hermes")
     for name, row in report["agents"].items():
         cooling = f", cooling {row['cooling_s']} s" if row["cooling_s"] else ""
         lines.append(f"  {name}: {'on' if row['enabled'] else 'off'}, {row['kind']} "
@@ -2325,9 +2625,14 @@ def _dispatch_command(raw_args: str = "") -> str:
 
 
 def register(ctx: Any) -> None:
+    global _CTX
+    _CTX = ctx
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("transform_llm_output", _on_transform_output)
-    ctx.register_middleware("llm_execution", _on_llm_execution)
+    try:
+        ctx.register_middleware("llm_execution", _on_llm_execution)
+    except Exception:  # noqa: BLE001 - an older Hermes: the plugin still loads, and /dispatch says why it idles
+        pass
     ctx.register_command("dispatch", _dispatch_command, description="Front desk: which agent answers a turn",
                          args_hint="[on|shadow|off | notice on|off]")
 ```
@@ -2381,7 +2686,7 @@ Rollback is `/dispatch off`.
 - [ ] **Step 2: Add the README bullet** (in "What leaves your machine", after the Routing bullet)
 
 ```markdown
-- **Dispatch** (`hermes-dispatch`, off by default): when a turn Jev judged hard is handed to another agent, that agent's provider receives a handoff: the person's message and up to six recent user and assistant turns, text only, redacted, about 12,000 characters at most. System prompts, tool output, memory and files are never part of it. A turn in a highly sensitive profile, or one mentioning a client file, a diagnosis, a BSN or an IBAN, or holding anything that looks like a secret, is answered on your machine and sent to no one. Jev itself reads the turn under the same rules as routing: redacted text for public profiles, coarse features for the rest.
+- **Dispatch** (`hermes-dispatch`, off by default): when a turn Jev judged hard is handed to another agent, that agent's provider receives a handoff: the person's message and up to six recent user and assistant turns, text only, redacted, about 12,000 characters. System prompts, tool output, memory and files are never part of it. It stays on your machine, sent to no one, when the profile is highly sensitive (a profile you did not classify counts as one), or when the message or any turn the handoff would carry names a client or patient file, a conversation report, a treatment plan, medication, a criminal record, debts, a BSN or an IBAN, or looks like it holds a secret. The words are Dutch and extendable in `dispatch.json`. Jev itself reads the turn under the same rules as routing: redacted text for public profiles, coarse features for the rest.
 ```
 
 - [ ] **Step 3: Add the CHANGELOG entry** (at the top of `## Unreleased`)
@@ -2389,7 +2694,7 @@ Rollback is `/dispatch off`.
 ```markdown
 **Receptionist dispatch: a hard turn goes to the agent that should answer it**
 
-- New `hermes-dispatch` plugin (off by default) and `jev dispatch`. On the first provider call of a turn, `llm_execution` middleware classifies the turn with Jev, applies a deterministic policy (privacy class, level, context window, cooldowns, order), and either lets the local call go ahead or hands the turn to Codex on a ChatGPT login, Claude Code, or OpenRouter. The answer comes back unchanged under one line naming its author. Shadow mode decides and logs only. A quota, auth or missing-program failure cools that agent for every lane through the ladder, and the next agent or the local model answers.
+- New `hermes-dispatch` plugin (off by default) and `jev dispatch`. On the first provider call of a turn, `llm_execution` middleware classifies the turn with Jev, applies a deterministic policy (privacy class, level, context window, cooldowns, order), and either lets the local call go ahead or hands the turn to Codex on a ChatGPT login, Claude Code, or OpenRouter. The answer comes back unchanged under one line naming its author. Shadow mode decides and logs only. A quota, auth or missing-program failure cools that agent for every lane through the ladder, a timeout cools it for five minutes, and the next agent or the local model answers. A turn spends at most `turn_budget` (15 minutes) on agents. The privacy class covers every turn a handoff would carry, not only the newest.
 - `route.judge_answers`, `route.clip_ask` and `route.is_risky` are extracted from `route.decide` with no change in behaviour, so routing and dispatch share one calibrated judgement.
 - The TRIAGE record follows the reasoning library's routing contract, so a local receptionist can later take Jev's place as the classifier (one classifier per turn).
 - `tests/test_turn.py` and `tests/test_question_shape.py` no longer depend on a real key being installed.
