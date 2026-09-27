@@ -60,6 +60,12 @@ The first batch was implemented and reviewed. These plan changes came out of it,
   - Dispatch cooldowns have their own names.
   - A broken setting in a later file makes things stricter.
   - The Task 11 plugin forgets a failed Claude session and hands over a message made of parts as text.
+- **Tasks 13 and 14:** these came from the review of Tasks 10b-12.
+  - Every profile of a multiplexed gateway is itself, not "default" (blocking).
+  - The handoff's history is the clean conversation, without recalled memory or plugin context (blocking).
+  - More secret forms are recognised (blocking), and code about passwords no longer is.
+  - A broken agent entry or file turns dispatch off.
+  - Claude gets no MCP servers and no tools, and runs in one stable empty directory.
 - **Task 3:** dict settings merge one level deep, a bad number in `dispatch.json` counts as the default, and `turn_budget` and `timeout_cooldown` are added.
 - **Task 8:** `leaving_text` gives the privacy check everything a handoff would carry.
 - **Task 9:** the privacy class covers the history too, a turn has a time budget, and a timeout cools the agent for five minutes.
@@ -81,9 +87,14 @@ codex exec --help | grep -E -- "--cd|-C"             # the empty working directo
 echo "Antwoord met alleen het woord: hallo" | codex exec --skip-git-repo-check --sandbox read-only -
 # Claude Code: logged in with the Max plan (never --bare: that ignores the subscription login)
 claude --version
-claude --help | grep -E -- "--disallowedTools|--permission-mode|--max-turns"
+claude --help | grep -E -- "--disallowedTools|--permission-mode|--max-turns|--strict-mcp-config|--tools "
+# the answer and a session_id; then resume that session from the same empty directory (Task 14 uses one)
+mkdir -p /tmp/jev-claude-check && cd /tmp/jev-claude-check
 echo "Antwoord met alleen het woord: hallo" | claude -p --output-format json --permission-mode plan \
+  --strict-mcp-config --tools "" \
   --disallowedTools "Bash,Read,Grep,Glob,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task"
+echo "Welk woord zei je net?" | claude -p --output-format json --permission-mode plan --tools "" --resume <session_id>
+cd -
 # a turn waits up to turn_budget (600 s) inside the provider call; Hermes's idle limits must be higher
 hermes config show | grep -E "gateway_timeout"
 # OpenRouter key for the last resort, stored by jev (the person pastes it into the page)
@@ -4106,6 +4117,251 @@ Expected: `OK` and `clean`.
 ```bash
 git add docs/receptionist-dispatch.md README.md CHANGELOG.md AGENTS.md
 git commit -m "docs: what dispatch sends, how to roll it out, and how to turn it off"
+```
+
+---
+
+### Task 13: Secret forms still missed, without flagging auth code (review of Tasks 10b-12, blocking)
+
+Tasks 13 and 14 touch different files and can run side by side. This task only touches `jevkit/privacy.py` and a new test file.
+
+**Blocking finding.** After Task 10c these still went out unmasked. Each gave `has_secret_value` False, class `private`, and survived `redact`:
+- JSON with a compound or short key, where the quote before `:` defeated `_NAMED_VALUE`: `{"db_password": "Welkom01!"}`, `{"pass": "Welkom01!"}`, `{"api_token": "d8f7a6s5d4f3"}`.
+- Dutch compounds: `Mijn bankwachtwoord is Zonnebloem12`, `Het wifiwachtwoord is Zonnebloem12`.
+- A verb between "is" and the value: `Mijn wachtwoord is veranderd in Zonnebloem12`, `The password is set to hunter22`.
+- Env names without a separator: `export PGPASSWORD=Welkom01`, `DBPASS=Welkom01`.
+- Unknown labels: `inlogcode: Welkom01`, `mijn toegangscode is Welkom01`.
+- Command lines: `redis-cli -a Welkom01`, `docker login -p Welkom01`.
+- Short labels: `pw: Welkom01!`.
+
+**Also found.**
+- **False positives.** Ordinary auth code and support questions became highly sensitive, so they were never handed over.
+- **IBAN and Dutch mobile spellings** got past both the check and `redact`, and `redact` had no IBAN rule at all.
+- **`is_sensitive` had no Dutch words.**
+- **Quadratic patterns.** `_SECRET_ASSIGNMENT`, `_NAMED_VALUE`, `_EMAIL` and `_URL_USERINFO` take about 50 s on 50 KB of `a-a-a-…`.
+
+**Files:**
+- Modify: `jevkit/privacy.py`
+- Create: `tests/test_privacy_forms.py`
+
+- [ ] **Step 1: Write the failing tests** in `tests/test_privacy_forms.py` (offline, `unittest`)
+
+1. **`MORE_SECRETS`.** Every item makes `privacy.has_secret_value` True. After `privacy.redact(item)` the value itself (`Welkom01`, `Zonnebloem12`, `hunter22`, `d8f7a6s5d4f3`, `zonnebloem`) is gone:
+   - `{"db_password": "Welkom01!"}`, `{"smtp_password": "zonnebloem"}`, `{"pass": "Welkom01!"}`, `{"api_token": "d8f7a6s5d4f3"}`
+   - `Mijn bankwachtwoord is Zonnebloem12`, `Het wifiwachtwoord is Zonnebloem12`
+   - `Mijn wachtwoord is veranderd in Zonnebloem12`, `The password is set to hunter22`, `My password was changed to Welkom01`
+   - `export PGPASSWORD=Welkom01`, `DBPASS=Welkom01`
+   - `inlogcode: Welkom01`, `mijn toegangscode is Welkom01`
+   - `redis-cli -a Welkom01`, `docker login -p Welkom01`
+   - `pw: Welkom01!`
+2. **`CODE_AND_QUESTIONS`.** Every item makes `has_secret_value` False:
+   - Code that handles a password without holding one:
+     - `self.password = password`
+     - `psycopg2.connect(host=host, user=user, password=password)`
+     - `password = getpass.getpass("Password: ")`
+     - `password = models.CharField(max_length=128)`
+     - `password: string;`
+     - `pub password: String,`
+     - `'password' => Hash::make($request->password)`
+     - `pin = Pin(2, Pin.OUT)`
+     - `pin = board.D18`
+   - Questions about a password:
+     - `Mijn wachtwoord is kwijt, hoe kom ik weer binnen?`
+     - `Mijn wachtwoord is geblokkeerd na drie pogingen`
+     - `My password is locked after three tries`
+   - Commands that name a variable, not a value:
+     - `git clone https://oauth2:${GITLAB_TOKEN}@gitlab.com/group/repo.git`
+     - `mysql -h 127.0.0.1 -P3306 -u root -p`
+     - `sshpass -p "$SSHPASS" ssh host`
+   - Words that only contain "pass": `bypass = True`, `compass: north`.
+3. **IBAN.** `has_iban` is True for `NL 91 ABNA 0417 1643 00`, `NL91  ABNA  0417  1643  00` and `NL91.ABNA.0417.1643.00`. `redact("Stort het op NL91 ABNA 0417 1643 00 graag")` no longer contains `0417`. `es2023 so that` still gives no IBAN.
+4. **Mobile numbers.** `has_contact_details` is True for `06.12.34.56.78`, `(06) 12345678` and `06 - 1234 5678`, and `redact` removes the digits of each.
+5. **Dutch words.** `privacy.is_sensitive("Hoe reset ik mijn wachtwoord van de bank?")` is True.
+6. **Linear time.** For each of `"a-"`, `"a."`, `"a_"`, `"a:"`, `"a@"` and `"a/"` repeated to 50 KB, each of `has_secret_value`, `redact`, `has_contact_details`, `is_sensitive` and `has_iban` finishes in under 2 s. Each takes 5-50 s today.
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `python3 -m unittest tests.test_privacy_forms -v`
+Expected: failures in each group. The timing test may take minutes before it fails.
+
+- [ ] **Step 3: Change `jevkit/privacy.py`**
+
+The reviewer's prototype passed the full suite and turned every repro above. Start from it:
+
+```python
+_PASSWORD_LABEL = r"(?:password|passwd|passphrase|\w*wachtwoord|inlogcode|toegangscode|pincode|pin|pw)"
+_PASSWORD_SENTENCE = re.compile(
+    r"(?i)\b" + _PASSWORD_LABEL + r"\b[^.\n?!]{0,40}?\b(?:is|was|luidt|=)\b\s*:?\s*"
+    r"(?:(?:now|nu|set|changed|reset|updated|veranderd|gewijzigd|aangepast)\s+(?:to|into|in|naar)\s+)?"
+    r"[\"']?([^\s\"',;.!?)]+)")
+# A name prefix is only one people give passwords: `bypass` and `compass` are not passwords.
+_NAMED_VALUE = re.compile(
+    r"(?i)\b(?:[a-z0-9]+[_-]){0,8}((?:db|pg|my|mysql|smtp|mail|redis|admin|root|user|wifi|ftp|ssh|sql|ldap|vpn)?"
+    r"pass(?:wd|word)?|pwd|secret|token|key|apikey|auth|credentials?)\b[\"']?"
+    r"\s*[:=]\s*[\"']?([^\s\"',;})]+)")
+_CODE_VALUE = re.compile(r"[(\[{]|::|->|^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
+_TYPE_WORDS = {"string", "text", "bytes", "number", "integer", "bool", "boolean", "object", "varchar"}
+# _NOT_A_VALUE gains: kwijt, geblokkeerd, verplicht, ongeldig, onbekend, hoofdlettergevoelig,
+# locked, mandatory, optional, case-sensitive
+
+def _value_like(value: str, strict: bool) -> bool:
+    value = value.strip().strip("\"'")
+    lowered = value.lower()
+    if len(value) < 4 or lowered in _NOT_A_VALUE or lowered in _TYPE_WORDS:
+        return False
+    if _CODE_VALUE.search(value) or re.fullmatch(r"\w*(?:password|passwd|pass|pwd|wachtwoord)", lowered):
+        return False    # `password = getpass.getpass()`, `password=password`: code about a password
+    ...                 # the rest as it is
+
+# has_secret_value: a password-named value is judged as after a password word
+    if any(_value_like(m.group(2), strict=not re.search(r"(?i)pass(?:wd|word)?$|pwd$", m.group(1)))
+           for m in _NAMED_VALUE.finditer(probe)):
+        return True
+```
+
+Then add the rest:
+- **`_URL_USERINFO`:** refuse a `$` value: `://[^/\s:@]{0,256}:(?!\$)[^/\s@]{1,256}@`, with the scheme bounded as `[a-z][a-z0-9+.-]{0,31}`.
+- **`_CLI_SECRET`:**
+  - mysql's `-p` is case-sensitive: `\s(?-i:-p)(?![\s$])`.
+  - `sshpass` and `--password` refuse a `$` value even after a quote: `(?![\"']?\$)`.
+  - Add `\bredis-cli\b[^\n]*?\s-a\s+(?![\"']?\$)\S+` and `\bdocker\s+login\b[^\n]*?\s(?:-p|--password)\s+(?![\"']?\$)\S+`.
+- **IBAN:**
+  - The candidate allows a space after the country code, one or two separators, and dots:
+    ```python
+    r"(?<![A-Z0-9])[A-Z]{2} ?\d{2}(?:[ .-]{0,2}[A-Z0-9]{4}){2,7}(?:[ .-]{0,2}[A-Z0-9]{1,3})?(?![A-Z0-9])"
+    ```
+    `compact` strips `[ .-]`.
+  - `redact` replaces every candidate that passes mod 97 with `[iban]`, before the phone and card rules run.
+- **`_NL_MOBILE`:**
+  ```python
+  r"(?<![\d+])(?:\+31\s?(?:\(0\)\s?)?|0031\s?|\(0|0)6\)?(?:\s?[.-]\s?|\s)?(?:\d[\s.-]?){7}\d(?!\d)"
+  ```
+- **`_SECRET_WORDS`:** add `wachtwoord|pincode|inlogcode|toegangscode`.
+- **Bounded repetitions:**
+  - `_SECRET_ASSIGNMENT`: `(?:[_-][A-Z0-9]+){0,8}`.
+  - `_EMAIL`: local part `{1,64}`, domain `{1,253}`.
+  - Measure every other pattern on the six 50 KB shapes, and bound whatever is not linear.
+
+- [ ] **Step 4: Run until green**, then run the whole suite. `SECRET_FORMS` and `NOT_SECRETS` in `tests/test_dispatch.py` must still pass unchanged.
+
+Run: `env -u TYPESAFE_API_KEY -u OPENROUTER_API_KEY python3 -m unittest discover -s tests && python3 scripts/check_release.py`
+Expected: `OK` and `clean`, on python3 and 3.9.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add jevkit/privacy.py tests/test_privacy_forms.py
+git commit -m "privacy: the secret forms the review still found, code about passwords left alone, linear on any input"
+```
+
+---
+
+### Task 14: The profile a multiplexed gateway serves, a clean history, and the smaller review fixes (review of Tasks 10b-12, blocking)
+
+**Blocking findings.**
+1. **Every profile counted as "default".**
+   - Hermes serves several profiles from one gateway by default (`multiplex_profiles: True`). It binds each turn's profile with a context-local override (`hermes_constants.get_hermes_home_override()`) and leaves `HERMES_HOME` alone.
+   - The plugin, and `catalog.hermes_home()` behind `dispatch.policy_paths()`, read only `HERMES_HOME`.
+   - The result: a `highly_sensitive` profile's hard turns were classed as `default` (`private`) and handed out. `/dispatch on` in one profile switched every profile, and a profile's own `dispatch.json` was never read.
+   - hermes-jev's `_home()` has the same flaw, so routing's `private_profiles` had the same hole. hermes-handoff (`handoff.py:53-65`) already does it right.
+2. **The handoff's history came from the wire copy of the chat.**
+   - On the wire, each earlier user row carries its `api_content`: the recalled `<memory-context>` block and every `pre_llm_call` context (hermes-handoff's capsule included).
+   - `pre_llm_call`'s `conversation_history` has the clean text in `content`, and it ends with the current user turn.
+
+**Files:**
+- Modify:
+  - `hermes/plugin/hermes-dispatch/__init__.py`
+  - `hermes/plugin/hermes-jev/__init__.py` (`_home` only)
+  - `jevkit/catalog.py` (`hermes_home`)
+  - `jevkit/dispatch.py`
+  - `jevkit/agents.py`
+  - `jevkit/cli.py`
+  - `README.md`, `docs/receptionist-dispatch.md`, `CHANGELOG.md`
+- Test:
+  - `tests/test_dispatch_plugin.py`
+  - `tests/test_dispatch.py`
+  - `tests/test_agents.py`
+  - `tests/test_plugin_middleware.py`
+
+Test-first as before: for every item, a failing test, then the change, then green.
+
+1. **The turn's profile** (blocking 1).
+   - In both plugins' `_home()` and in `catalog.hermes_home()`, use the override first, then `HERMES_HOME`, then `~/.hermes`:
+     ```python
+     try:
+         from hermes_constants import get_hermes_home_override  # type: ignore
+         override = get_hermes_home_override()
+         if override:
+             return Path(override)
+     except Exception:  # noqa: BLE001 - outside Hermes, or an older one
+         pass
+     return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+     ```
+   - Tests: put a fake `hermes_constants` module into `sys.modules` whose override returns `<tmp>/profiles/secondbrain`, with `HERMES_HOME=<tmp>`. Then:
+     - both plugins' `_profile()` is `secondbrain`;
+     - `dispatch.policy_paths()` ends with `<tmp>/profiles/secondbrain/jev/dispatch.json`;
+     - the plugin calls `dispatch_turn` with `profile="secondbrain"`;
+     - `/dispatch on` writes `<tmp>/profiles/secondbrain/jev/dispatch-state.json`.
+2. **A clean history** (blocking 2).
+   - `_on_pre_llm_call` takes `conversation_history`. It keeps the dict rows and drops rows marked `_compressed_summary`, which are compaction summaries of tool work.
+   - `_on_llm_execution` hands `turn["history"] or wire` to `dispatch_turn`. `context_tokens` is still counted from the wire.
+   - Test: history rows with `content` "Kijk naar de scheduler" and `api_content` "Kijk naar de scheduler\n<memory-context>Sander woont in Utrecht</memory-context>". The wire request carries the `api_content` text. The messages `dispatch_turn` receives hold neither `memory-context` nor `Utrecht`, and their last row is the current user turn.
+3. **The turn map** (S5, N7).
+   - `_TURNS` stays keyed by session. `pop` and re-insert on every `pre_llm_call`, and evict the oldest only when the key is new.
+   - `_on_llm_execution` finds the turn by `turn_id` when the session's entry does not match. Preflight compression can rotate `session_id` between `pre_llm_call` and the first provider call; Hermes's `turn_id` holds a uuid.
+   - Tests:
+     - 256 sessions tracked plus one update evicts nothing;
+     - a rotated `session_id` with the same `turn_id` still dispatches.
+4. **One classifier, only when it exists** (N10). `_jev_routing_active()` is False when `_CTX.has_plugin` exists and `_CTX.has_plugin("hermes-jev")` is False: a stale `/jev routing on` must not silence dispatch forever. Test with a fake ctx.
+5. **The notice** (N5): a test that `_on_transform_output` prefixes a downgraded local answer once, then returns None.
+6. **A person's own terms stay out of the log** (N3). `privacy_class` names a built-in term (`mentions dossier`), but says `mentions a term from sensitive_terms` for one the person added. Test.
+7. **A broken entry or file turns things off** (S2, and the Task 10e gap).
+   - Add `"mode": "off"` to `_BROKEN_TOP`.
+   - A non-dict agent entry in a later file (`"openai": false`, `null`, `"off"`) sets that agent to `_BROKEN_AGENT`.
+   - A present but non-dict `agents` (`null`, `[]`, `"none"`) does that to every agent.
+   - A file that exists but cannot be read or parsed (not UTF-8, invalid JSON, not an object):
+     - applies `_BROKEN_TOP` and turns every agent off;
+     - its path goes into `policy["broken_files"]`.
+   - `FileNotFoundError` and `NotADirectoryError` still just mean "no file".
+   - `check_agents` reports `broken_files`, and `/dispatch` shows a line for them.
+   - Tests for each case, including a non-UTF-8 file that used to raise `UnicodeDecodeError`.
+8. **What a subscription login needs** (S7). `_ENV_KEEP` gains `CLAUDE_CODE_OAUTH_TOKEN` (the Max-plan token from `claude setup-token`), `ALL_PROXY` and `all_proxy`. Test: they are kept, and `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY` and `TYPESAFE_API_KEY` are still dropped.
+9. **No MCP servers, no tools** (S8). `CLAUDE_ARGV` gains `--strict-mcp-config` and `--tools ""` (all built-in tools off), and keeps `--disallowedTools` as the fallback. Test the argv.
+10. **Claude's model names** (N2). `_MODEL_NAME` accepts `[` and `]`, as in `opus[1m]`, and still refuses a leading `-`. Test.
+11. **A stable empty directory for claude.**
+    - Why: a fresh temporary directory per call makes `--resume` depend on a cross-project transcript scan, which older CLIs lack. It also leaves one `~/.claude/projects/` folder per turn.
+    - Use `Path(tempfile.gettempdir()) / f"jev-claude-{uid}" / "work"`, created with mode 0o700.
+    - Use it only if it is a real directory (not a symlink), owned by this user, and empty. Otherwise use a fresh temporary directory and drop the session, because isolation beats continuity.
+    - It stays under the temp directory, not under `~`. Claude Code reads every `CLAUDE.md` from its working directory up to `/`.
+    - Tests:
+      - two runs share the directory;
+      - a non-empty or foreign directory falls back and drops the session.
+      Patch `tempfile.tempdir`, and capture `cwd` by patching `agents.subprocess.run`.
+12. **Leftovers from Task 10f.**
+    - `jev dispatch` with `"messages": []` treats the prompt as the only turn; it used to raise `IndexError`.
+    - `--privacy` help: "make the profile at least this strict for this call; it never loosens one".
+    - Tests.
+13. **N6:** fix the `jev ={` typo in `classify_with_jev`.
+14. **Docs** (README, docs/receptionist-dispatch.md, CHANGELOG):
+    - Name the built-in terms as they are: the Dutch words in `DEFAULT_SENSITIVE_TERMS`. English words do not match (S4).
+    - Add a README docs-table row, plus a link at the end of the Dispatch bullet (S6).
+    - The README paragraph inside the list becomes a fourth sub-bullet (N1).
+    - Under limits: Stop does not interrupt a handed-off turn. The agent runs until it answers or `turn_budget` ends (N8).
+    - Say plainly: Codex's read-only sandbox can still read any file the Hermes user can read, `~/.hermes` included. A turn that asks it to can send such a file to OpenAI. Claude runs with no tools. The remedies are to keep Codex off, or run Hermes as a user that cannot read what must stay here.
+    - `jev ladder status` does not list dispatch cooldowns. `jev dispatch check` and `/dispatch` do, and `jev ladder clear --rung dispatch:openai` clears one.
+    - Each profile of a multiplexed gateway reads its own `dispatch.json` and its own `/dispatch` switch.
+    - CHANGELOG: replace "values of the wrong type are ignored" with what Task 10e and item 7 do: a broken value or file in a later layer turns agents off and privacy to the strictest.
+
+- [ ] **Run and commit**
+
+Run: `env -u TYPESAFE_API_KEY -u OPENROUTER_API_KEY python3 -m unittest discover -s tests && python3 scripts/check_release.py`
+Expected: `OK` and `clean`, on python3 and 3.9.
+
+```bash
+git add hermes/plugin/hermes-dispatch/__init__.py hermes/plugin/hermes-jev/__init__.py jevkit/catalog.py \
+        jevkit/dispatch.py jevkit/agents.py jevkit/cli.py README.md docs/receptionist-dispatch.md CHANGELOG.md \
+        tests/test_dispatch_plugin.py tests/test_dispatch.py tests/test_agents.py tests/test_plugin_middleware.py
+git commit -m "dispatch: the profile the gateway serves, a clean history, broken settings turn it off"
 ```
 
 ---
