@@ -50,6 +50,16 @@ The first batch was implemented and reviewed. These plan changes came out of it,
   - Terms without the trema count.
   - Bad values in `dispatch.json` are tolerated.
   - The Task 0 modules also guard against reaching the network.
+- **Tasks 8b and 10b-10e:** these came from the reviews of Tasks 2b-10.
+  - Jev honours every privacy setting routing has.
+  - OpenRouter is public-only by kind.
+  - The IBAN registry is complete.
+  - Secret values are recognised in every common form (a blocking finding).
+  - Agents run isolated: an empty directory, a minimal environment, and no tools for claude (a blocking finding).
+  - Failures carry no output text.
+  - Dispatch cooldowns have their own names.
+  - A broken setting in a later file makes things stricter.
+  - The Task 11 plugin forgets a failed Claude session and hands over a message made of parts as text.
 - **Task 3:** dict settings merge one level deep, a bad number in `dispatch.json` counts as the default, and `turn_budget` and `timeout_cooldown` are added.
 - **Task 8:** `leaving_text` gives the privacy check everything a handoff would carry.
 - **Task 9:** the privacy class covers the history too, a turn has a time budget, and a timeout cools the agent for five minutes.
@@ -67,10 +77,15 @@ hermes config show | grep -i -E "provider|api_mode|base_url"
 # Codex: logged in, flags present, prompt read from stdin
 codex --version && codex login status
 codex exec --help | grep -E -- "--json|--sandbox|--output-last-message|--skip-git-repo-check"
+codex exec --help | grep -E -- "--cd|-C"             # the empty working directory is passed with --cd
 echo "Antwoord met alleen het woord: hallo" | codex exec --skip-git-repo-check --sandbox read-only -
 # Claude Code: logged in with the Max plan (never --bare: that ignores the subscription login)
 claude --version
-echo "Antwoord met alleen het woord: hallo" | claude -p --output-format json --permission-mode plan
+claude --help | grep -E -- "--disallowedTools|--permission-mode|--max-turns"
+echo "Antwoord met alleen het woord: hallo" | claude -p --output-format json --permission-mode plan \
+  --disallowedTools "Bash,Read,Grep,Glob,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task"
+# a turn waits up to turn_budget (600 s) inside the provider call; Hermes's idle limits must be higher
+hermes config show | grep -E "gateway_timeout"
 # OpenRouter key for the last resort, stored by jev (the person pastes it into the page)
 jev setup-key --provider openrouter
 jev dispatch check
@@ -2755,6 +2770,547 @@ git commit -m "dispatch: Jev honours routing's privacy settings; OpenRouter publ
 
 ---
 
+### Task 10c: Secret values in every common form, Dutch phone numbers, a tighter handoff (review of Tasks 4b-8, blocking)
+
+**Blocking finding.** `has_secret_value` from Task 4b let real values through. A private turn holding any of these went to Codex unmasked:
+- `{"password": "Welkom01!"}`, `'password' => '…'` or `"api_key": "…"`;
+- a URL with credentials;
+- "wachtwoord van mijn bank is X", or "my password is sunshine";
+- `Authorization: Basic …`;
+- `mysql -pX`, `--password X` or `curl -u user:pw`;
+- `DB_PASS=`, `MYSQL_PWD=` or `pwd=`;
+- a four-digit PIN.
+
+**Also fixed here:**
+- `06 1234 5678`, `06-1234 5678` and `+31 (0)6 12345678` were missed by both the contact check and `redact`.
+- The handoff's `Reason:` line was not redacted.
+- `max_messages: 200` could send about 48,000 characters.
+
+**The rule after a password word** (password, wachtwoord, pincode and so on): any value that is not an ordinary word counts, including letters-only ("sunshine"), because "my password is X" leaves no doubt. After a key or token word, or in `NAME=value`, a value counts only when it does not look like code. Every case below was checked against a prototype: 28 secret forms are caught, and 28 questions and code lines are not.
+
+**Files:**
+- Modify: `jevkit/privacy.py` (replace the `has_secret_value` block; add `_NL_MOBILE` to `redact` and to `_CONTACT_PHONE`)
+- Modify: `jevkit/relay.py` (`_MAX_HISTORY`, the Reason and Constraints lines)
+- Test: `tests/test_dispatch.py`, `tests/test_relay.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_dispatch.py`:
+
+```python
+AWS_LIKE = "wJalrXUtnFEMI" + "/K7MDENG/bPxRfiCY" + "EXAMPLEKEY"    # built at runtime: no key shape in the source
+
+SECRET_FORMS = [
+    '{"password": "Welkom01!"}', "'password' => 'Welkom01!'", '"api_key": "abcd1234efgh"',
+    "https://admin:Welkom01!@db.example.org/app", "redis://:pw1234@host:6379", "password is: Welkom01",
+    "wachtwoord van mijn bank is Zonnebloem", "my password is sunshine", "Authorization: Basic dXNlcjpwYXNz",
+    "mysql -u root -pWelkom01 db", "run it with --password Welkom01", "curl -u admin:Welkom01 https://x.y",
+    "DB_PASS=Welkom01", "MYSQL_PWD=Welkom01", "pwd=Welkom01", "pincode: 4829", "mijn pincode is 4829",
+    "mijn OPENAI_API_KEY=nietecht123", "GITHUB_TOKEN=nietecht123", "my password is hunter22", "wachtwoord: Welkom01!",
+    "Authorization: Bearer abcdefghijklmnop123", "-----BEGIN RSA PRIVATE KEY-----", "secret: " + AWS_LIKE,
+    "password: 'hunter2'", "my password is hunter2, store it", "sshpass -p Welkom01 ssh host",
+]
+NOT_SECRETS = [
+    "How do I hash a password in Python?", "Why is my API key rejected?", "id = Column(Integer, primary_key=True)",
+    "cache_key = f(x)", "page_token=next_token", "the password is incorrect", "export OPENAI_API_KEY=$OPENAI_API_KEY",
+    "My password is too short, what is the minimum?", "The password is hashed with bcrypt", "the token is expired",
+    "API key is invalid, how do I rotate it?", "sort_key=lambda x: x", "Which password manager do you recommend?",
+    "Mijn wachtwoord is vergeten, hoe reset ik het?", "wachtwoord is niet sterk genoeg", "gcc -pthread main.c",
+    "git log -p", "password: required", "The API key is stored in the keychain",
+    "token = request.headers['X-Token']", "key = config.get('key')", "set PASSWORD in your .env file",
+    "curl -u $USER:$TOKEN https://api", "Use --password-stdin with docker login", "mysql -u root -p mydb",
+    "for key, value in items.items():", "headers = {'Authorization': f'Bearer {token}'}",
+]
+
+
+class SecretValueTests(unittest.TestCase):
+    def test_every_common_form_of_a_secret_value_is_caught(self):
+        for text in SECRET_FORMS:
+            self.assertTrue(dispatch.privacy.has_secret_value(text), text)
+
+    def test_questions_and_code_about_secrets_are_not_secrets(self):
+        for text in NOT_SECRETS:
+            self.assertFalse(dispatch.privacy.has_secret_value(text), text)
+
+    def test_dutch_mobile_numbers_in_every_usual_spelling(self):
+        for text in ("06 1234 5678", "06-1234 5678", "+31 (0)6 12345678", "0612345678"):
+            self.assertTrue(dispatch.privacy.has_contact_details(text), text)
+            self.assertNotIn("5678", dispatch.privacy.redact(f"bel {text} morgen"), text)
+```
+
+Append to `tests/test_relay.py`, in `HandoffTests`:
+
+```python
+    def test_the_reason_line_is_redacted_too(self):
+        text = relay.build_handoff(CHAT, agent="openai", reason="asked by jan@example.org")
+        self.assertNotIn("jan@example.org", text)
+
+    def test_a_huge_history_setting_is_capped(self):
+        chat = [{"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 500} for i in range(401)]
+        self.assertLess(len(relay.build_handoff(chat, agent="openai", reason="r", max_messages=200)), 20000)
+        self.assertEqual(relay.leaving_text(chat, max_messages=200).count("\n"), relay._MAX_HISTORY)
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `python3 -m unittest tests.test_dispatch.SecretValueTests tests.test_relay -v`
+Expected: failures listing the missed secret forms and the phone spellings, the unredacted reason, and the uncapped history (plus `AttributeError` for `_MAX_HISTORY`).
+
+- [ ] **Step 3: In `jevkit/privacy.py`, replace everything from `_LABELLED_VALUE = ...` to the end of `has_secret_value` with:**
+
+```python
+# What a credential looks like as a value, as opposed to a word about one. `is_sensitive` answers
+# the broader question for Jev, whose call can be skipped at no cost. A handoff to another agent
+# cannot be skipped that cheaply, and "how do I hash a password?" holds no password.
+#
+# After a password word, any value that is not an ordinary word counts, letters-only included:
+# "my password is sunshine" leaves no doubt. After a key or token word, or in NAME=value, a value
+# counts only when it does not look like code, because `cache_key = f(x)` is everyday code.
+_PASSWORD_LABEL = r"(?:password|passwd|passphrase|wachtwoord|pincode|pin)"
+_KEY_LABEL = r"(?:secret|token|api[_ -]?key|access[_ -]?key|private[_ -]?key|client[_ -]?secret)"
+_LABELLED_VALUE = re.compile(                                       # JSON, YAML, PHP, prose
+    r"(?i)[\"']?\b(" + _PASSWORD_LABEL + r"|" + _KEY_LABEL + r")\b[\"']?"
+    r"(?:\s*(?:=>|[:=])\s*|\s+(?:is|was|=|:)\s*:?\s*)[\"']?([^\s\"',;})]+)")
+_PASSWORD_SENTENCE = re.compile(                                    # "wachtwoord van mijn bank is X"
+    r"(?i)\b" + _PASSWORD_LABEL + r"\b[^.\n?!]{0,40}?\b(?:is|was|luidt|=)\b\s*:?\s*[\"']?([^\s\"',;.!?)]+)")
+_NAMED_VALUE = re.compile(                                          # DB_PASS=, MYSQL_PWD=, pwd=
+    r"(?i)\b(?:[a-z0-9]+[_-])*(?:pass|pwd|passwd|password|secret|token|key|apikey|auth|credentials?)\b"
+    r"\s*[:=]\s*[\"']?([^\s\"',;}]+)")
+_URL_USERINFO = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@")
+_AUTH_HEADER = re.compile(r"(?i)\b(?:proxy-)?authorization\s*:\s*[a-z]+\s+[A-Za-z0-9._~+/=-]{6,}")
+_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}")
+_CLI_SECRET = re.compile(
+    r"(?i)(?:--password[= ]\s*(?![-$])\S+"
+    r"|\bmysql\w*\b[^\n]*?\s-p(?![\s$])\S+"
+    r"|\bsshpass\s+-p\s*(?!\$)\S+"
+    r"|\bcurl\b[^\n]*?\s(?:-u|--user)\s+[^\s:]+:(?!\$)\S+)")
+_PRIVATE_KEY_BLOCK = re.compile(r"BEGIN [A-Z ]*PRIVATE KEY")
+_CODE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:\(\))?")
+_NOT_A_VALUE = {
+    "true", "false", "none", "null", "nil", "undefined", "required", "incorrect", "invalid", "missing", "expired",
+    "wrong", "correct", "empty", "blank", "set", "unset", "reset", "changed", "hashed", "encrypted", "stored",
+    "saved", "sent", "shown", "visible", "hidden", "weak", "strong", "long", "short", "too", "not", "no", "also",
+    "still", "now", "being", "the", "a", "an", "my", "your", "our", "their", "this", "that", "same", "different",
+    "used", "needed", "checked", "validated", "rejected", "accepted", "ok", "okay", "fine", "leaked", "compromised",
+    "secure", "insecure", "niet", "fout", "goed", "verkeerd", "leeg", "gewijzigd", "veranderd", "verlopen",
+    "vergeten", "onjuist", "juist", "te", "nog", "ook", "het", "de", "een", "mijn", "jouw", "sterk", "zwak", "kort",
+    "lang", "opgeslagen", "versleuteld"}
+
+
+def _value_like(value: str, strict: bool) -> bool:
+    """Could this be the credential itself. `strict` after key and token words: not if it looks like code."""
+    value = value.strip().strip("\"'")
+    if len(value) < 4 or value.lower() in _NOT_A_VALUE:
+        return False
+    if value.startswith(("$", "{{", "<", "%", "os.", "process.env", "env.", "config.", "settings.")):
+        return False
+    if not strict:
+        return True
+    if len(value) < 6 or any(char in value for char in "([{"):
+        return False
+    return not (_CODE_NAME.fullmatch(value) and not any(char.isdigit() for char in value))
+
+
+def has_secret_value(text: str) -> bool:
+    """A credential itself in the text, in any of the forms people and programs write one."""
+    probe = normalize(text)
+    for shape in (_TOKEN_SHAPES, _PRIVATE_KEY_BLOCK, _BEARER_VALUE, _AUTH_HEADER, _URL_USERINFO, _CLI_SECRET):
+        if shape.search(probe):
+            return True
+    for match in _LABELLED_VALUE.finditer(probe):
+        if _value_like(match.group(2), strict=not re.fullmatch(r"(?i)" + _PASSWORD_LABEL, match.group(1))):
+            return True
+    if any(_value_like(match.group(1), strict=False) for match in _PASSWORD_SENTENCE.finditer(probe)):
+        return True
+    if any(_value_like(match.group(1), strict=True) for match in _NAMED_VALUE.finditer(probe)):
+        return True
+    return any(_mask_credential(match) == "[secret]" for match in _HIGH_ENTROPY.finditer(probe))
+```
+
+- [ ] **Step 4: Dutch mobile numbers, in `jevkit/privacy.py`**
+
+Add next to `_PHONE`:
+
+```python
+# 06 1234 5678, 06-12345678, +31 (0)6 12345678, 0031 6 ...: the North American shape above misses them all.
+_NL_MOBILE = re.compile(r"(?<![\d+])(?:\+31\s?(?:\(0\)\s?)?|0031\s?|0)6[\s-]?(?:\d[\s-]?){7}\d(?!\d)")
+```
+
+In `redact`, directly before `out = _PHONE.sub("[phone]", out)`, add `out = _NL_MOBILE.sub("[phone]", out)`. In `has_contact_details`, return `bool(_CONTACT_EMAIL.search(probe) or _CONTACT_PHONE.search(probe) or _NL_MOBILE.search(probe))`.
+
+- [ ] **Step 5: In `jevkit/relay.py`**
+
+Add `_MAX_HISTORY = 20` below `_IMAGE_PARTS`, with the comment `# more history than this is never sent, whatever the setting`.
+
+In both `leaving_text` and `build_handoff`, make the first line of the body `max_messages = max(0, min(int(max_messages), _MAX_HISTORY))`.
+
+In `build_handoff`:
+- make the Reason line `f"Reason: {clean(reason, 300)}"`;
+- make the Constraints line read `"Constraints: answer in writing only; read no files and run no commands; change nothing; answer in the language of the request"`.
+
+- [ ] **Step 6: Run everything**
+
+Run: `env -u TYPESAFE_API_KEY -u OPENROUTER_API_KEY python3 -m unittest discover -s tests && python3 scripts/check_release.py`
+Expected: `OK` and `clean`. Existing redact tests must still pass. If one pins an exact output that now masks a Dutch mobile number, the new masking is the intended change: update that expectation and say so in the report.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add jevkit/privacy.py jevkit/relay.py tests/test_dispatch.py tests/test_relay.py
+git commit -m "privacy: secret values in every common form; Dutch mobile numbers; a tighter handoff"
+```
+
+---
+
+### Task 10d: Agents run isolated, and fail only as AgentError (review of Tasks 4b-8, blocking)
+
+**Blocking finding.** The CLIs started in Hermes's own working directory with its whole environment. `codex exec --sandbox read-only` still runs read commands, and plan mode lets Claude read and grep. So an agent could grep `~/.hermes` sessions and memories and send them to its provider. An inherited `ANTHROPIC_API_KEY` would also override the Max login.
+
+**Also fixed here:**
+- Several errors escaped as something other than `AgentError`: `RecursionError`, `UnicodeDecodeError`, `PermissionError`, and `IndexError` on an empty argv.
+- A control character in the OpenRouter key could put the key into an exception message.
+- A failure's detail was the last raw line of output, which can be the answer text. That text went into the shared ladder file and the logs.
+- A session id or model name starting with `-` would be read as a flag.
+
+**Changes from the review of Tasks 8b-10:**
+- Dispatch cooldowns get their own names (`dispatch:<agent>`), so a dispatch timeout never cools routing's `claude` rung.
+- `turn_budget` becomes 600 s, which stays under Hermes's 900 s idle warning.
+- `check_agents` reports `policy_mode`, because the switch in force is only known to `/dispatch`.
+
+**Files:**
+- Modify: `jevkit/agents.py`
+- Modify: `jevkit/dispatch.py` (`DEFAULT_POLICY["turn_budget"]`, `_rung`, `dispatch_turn`, `check_agents`)
+- Test: `tests/test_agents.py`, `tests/test_dispatch.py` (the two refuse assertions change to `dispatch:openai`)
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `tests/test_agents.py`:
+
+```python
+import os  # noqa: E402
+
+
+class IsolationTests(unittest.TestCase):
+    def test_a_cli_runs_in_an_empty_directory_with_a_minimal_environment(self):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen.update(kwargs, argv=list(argv), listing=os.listdir(kwargs["cwd"]))
+            Path(argv[argv.index("--output-last-message") + 1]).write_text("ok", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        env = {"PATH": "/usr/bin", "HOME": "/tmp/h", "ANTHROPIC_API_KEY": "x1", "OPENAI_API_KEY": "x2",
+               "OPENROUTER_API_KEY": "x3", "TYPESAFE_API_KEY": "x4", "HERMES_HOME": "/tmp/hh"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(agents.subprocess, "run", fake_run):
+            agents.run_codex(PROMPT)
+        self.assertEqual(seen["listing"], [])
+        self.assertEqual(seen["argv"][seen["argv"].index("--cd") + 1], seen["cwd"])
+        self.assertEqual(set(seen["env"]), {"PATH", "HOME"})
+        self.assertEqual((seen["encoding"], seen["errors"]), ("utf-8", "replace"))
+
+    def test_claude_gets_no_file_shell_or_web_tools(self):
+        run = FakeRun(stdout=claude_json())
+        agents.run_claude(PROMPT, runner=run)
+        blocked = run.argv[run.argv.index("--disallowedTools") + 1]
+        for tool in ("Bash", "Read", "Grep", "Glob", "Edit", "Write", "WebFetch", "WebSearch"):
+            self.assertIn(tool, blocked.split(","))
+
+
+class ErrorHygieneTests(unittest.TestCase):
+    def test_every_way_a_cli_can_break_is_an_agent_error(self):
+        cases = [FakeRun(error=PermissionError("denied")), FakeRun(error=OSError("exec format error")),
+                 FakeRun(stdout="[" * 100000)]
+        for run in cases:
+            with self.assertRaises(agents.AgentError):
+                agents.run_claude(PROMPT, runner=run)
+        with self.assertRaises(agents.AgentError):
+            agents.run_codex(PROMPT, argv=["{model}"], runner=FakeRun())       # fills to nothing
+
+    def test_a_failure_never_carries_output_text(self):
+        leak = "Jan de Vries (dossier 4411) heeft een usage limit"
+        with self.assertRaises(agents.AgentError) as caught:
+            agents.run_codex(PROMPT, runner=FakeRun(returncode=1, stdout=leak))
+        self.assertEqual(caught.exception.code, "quota")
+        self.assertNotIn("Jan", str(caught.exception))
+        self.assertNotIn("4411", caught.exception.detail)
+
+    def test_a_malformed_key_is_refused_before_it_reaches_a_header(self):
+        with self.assertRaises(agents.AgentError) as caught:
+            agents.run_openrouter(PROMPT, model="m", key="or-abc\ndef", transport=lambda *_: b"{}")
+        self.assertEqual(caught.exception.code, "auth")
+        self.assertNotIn("abc", str(caught.exception))
+
+    def test_a_session_or_model_that_looks_like_a_flag_is_never_passed(self):
+        run = FakeRun(stdout=claude_json(session_id="--dangerous-flag"))
+        result = agents.run_claude(PROMPT, session="--dangerous-flag", runner=run)
+        self.assertNotIn("--dangerous-flag", run.argv)
+        self.assertEqual(result.session, "")
+        with self.assertRaises(agents.AgentError):
+            agents.run_codex(PROMPT, model="--yolo", runner=FakeRun(write="ok"))
+```
+
+Append to `tests/test_dispatch.py`:
+
+```python
+class IsolationOfCooldownsTests(unittest.TestCase):
+    def test_dispatch_cools_its_own_names_not_routings_rungs(self):
+        seen = []
+        pol = live_policy(openai=ON)
+
+        def fail(argv, stdin_text, timeout):
+            return subprocess.CompletedProcess(argv, 1, "", "usage limit")
+
+        dispatch.dispatch_turn("Find the race", CHAT, policy=pol, config=dispatch.route.load_config(NOWHERE),
+                               answers=HARD_GENERAL, runners={"codex": fail}, cooling=lambda name: seen.append(name) or 0.0,
+                               refuse=lambda name, reason, cooldown=0: seen.append(("refuse", name)))
+        self.assertIn(("refuse", "dispatch:openai"), seen)
+        self.assertTrue(all(isinstance(n, tuple) or n.startswith("dispatch:") for n in seen))
+
+    def test_an_adapter_bug_is_a_failed_attempt_not_a_lost_turn(self):
+        pol = live_policy(openai=ON)
+        with mock.patch.object(dispatch, "run_agent", side_effect=KeyError("bug")):
+            out = dispatch.dispatch_turn("Find the race", CHAT, policy=pol, config=dispatch.route.load_config(NOWHERE),
+                                         answers=HARD_GENERAL, cooling=NOT_COOLING, refuse=lambda *a, **k: None)
+        self.assertEqual((out["agent"], out["attempts"][0]["error"]), ("local", "failed"))
+
+    def test_the_default_budget_stays_under_hermes_idle_warning(self):
+        self.assertLess(dispatch.DEFAULT_POLICY["turn_budget"], 900)
+
+    def test_check_reports_the_mode_in_the_file_as_policy_mode(self):
+        report = dispatch.check_agents(policy(), which=lambda p: None, cooling=NOT_COOLING, has_key=lambda: False)
+        self.assertIn("policy_mode", report)
+        self.assertNotIn("mode", report)
+```
+
+In `TurnTests`, change the two refuse assertions to `("dispatch:openai", "quota", 1800.0)` and `("dispatch:openai", "timeout", 300.0)`.
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `python3 -m unittest tests.test_agents tests.test_dispatch -v`
+Expected: failures and errors in the new classes and in the two changed refuse assertions.
+
+- [ ] **Step 3: Change `jevkit/agents.py`**
+
+(a) Templates, and the two validations. Update the templates, then add the rest below them:
+
+```python
+CODEX_ARGV = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--cd", "{workdir}",
+              "--model", "{model}", "--output-last-message", "{output}", "-"]
+CLAUDE_ARGV = ["claude", "-p", "--output-format", "json", "--model", "{model}", "--max-turns", "{max_turns}",
+               "--permission-mode", "plan", "--disallowedTools", "{disallowed}", "--resume", "{session}"]
+# An answering agent needs none of these: no files, no shell, no web. It gets the handoff and answers.
+CLAUDE_DISALLOWED = "Bash,Read,Grep,Glob,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task"
+
+# The environment a CLI gets: what it needs to run and find its own login, nothing else. An API
+# key in Hermes's environment would override the subscription login, and no agent needs Jev's.
+_ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ", "TMPDIR", "SHELL",
+             "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+             "CODEX_HOME", "CLAUDE_CONFIG_DIR", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy",
+             "http_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
+# A value that becomes its own argv item must never start like a flag.
+_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}")
+
+
+def agent_env() -> dict:
+    return {name: os.environ[name] for name in _ENV_KEEP if name in os.environ}
+
+
+def _check_model(model: str) -> str:
+    if model and not _MODEL_NAME.fullmatch(model):
+        raise AgentError("failed", "the configured model name is not usable")
+    return model
+```
+
+(b) `_run` gets the working directory and the environment, and decodes safely:
+
+```python
+def _run(argv: Sequence[str], stdin_text: str, timeout: float, cwd: Optional[str] = None) -> Any:
+    return subprocess.run(list(argv), input=stdin_text, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=timeout, check=False, cwd=cwd, env=agent_env())
+```
+
+(c) `_call` takes `workdir` and catches every way a start can fail:
+
+```python
+def _call(argv: Sequence[str], stdin_text: str, timeout: float, runner: Optional[Runner],
+          workdir: Optional[str] = None) -> Any:
+    if not argv:
+        raise AgentError("failed", "the argument list is empty")
+    try:
+        if runner is not None:
+            return runner(argv, stdin_text, timeout)
+        return _run(argv, stdin_text, timeout, cwd=workdir)
+    except FileNotFoundError:
+        raise AgentError("missing", f"{argv[0]} is not installed or not on PATH") from None
+    except PermissionError:
+        raise AgentError("missing", f"{argv[0]} is not executable") from None
+    except subprocess.TimeoutExpired:
+        raise AgentError("timeout", f"{argv[0]} gave no answer within {timeout:.0f} s") from None
+    except (OSError, ValueError) as error:
+        raise AgentError("failed", f"{argv[0]} could not start ({type(error).__name__})") from None
+```
+
+(d) `_failure` names only what matched, never the output:
+
+```python
+def _failure(tool: str, text: str, returncode: Any) -> AgentError:
+    """The failure's code, and in its detail only the fixed phrase that decided it: never output text."""
+    for code, pattern in (("quota", _QUOTA), ("auth", _AUTH)):
+        found = pattern.search(text)
+        if found:
+            return AgentError(code, f"{tool} exit {returncode}: {found.group(0).lower()}")
+    return AgentError("failed", f"{tool} exit {returncode}")
+```
+
+(e) `_codex_message`: catch `(ValueError, RecursionError)` instead of `json.JSONDecodeError`.
+
+(f) `run_codex`:
+- make the scratch layout two directories: `workdir = os.path.join(scratch, "work")` created empty with `os.mkdir(workdir)`, and the answer file at `os.path.join(scratch, "answer.txt")`;
+- call `_call(fill(argv or CODEX_ARGV, model=_check_model(model), output=output, workdir=workdir), prompt, timeout, runner, workdir)`.
+
+(g) `run_claude`:
+- validate first: `session = session if session and _SESSION_ID.fullmatch(session) else ""`;
+- run in an empty temporary directory: `with tempfile.TemporaryDirectory(prefix="jev-claude-") as workdir:` around the `_call`;
+- fill with `model=_check_model(model), session=session, max_turns=max_turns, disallowed=CLAUDE_DISALLOWED`;
+- parse with `except (ValueError, RecursionError): data = None`;
+- return `session=returned if _SESSION_ID.fullmatch(returned) else ""`, where `returned = str(data.get("session_id") or "")`.
+
+(h) `run_openrouter`: after resolving the key, add:
+
+```python
+    if not key.isprintable() or any(char.isspace() for char in key):
+        raise AgentError("auth", "the stored OpenRouter key is malformed; store it again")
+```
+
+Then:
+- add `except (ValueError, OSError): raise AgentError("failed", "openrouter request could not be sent") from None` after the `client.JevError` handler;
+- add `RecursionError` to the reply-parsing `except`.
+
+- [ ] **Step 4: Change `jevkit/dispatch.py`**
+
+- `DEFAULT_POLICY["turn_budget"]` becomes `600`, with the comment `# under Hermes's 900 s idle warning`.
+- Add below `_COOL_ON`:
+
+```python
+def _rung(name: str) -> str:
+    """Dispatch's cooldowns live in the shared ladder file under their own names, so a dispatch
+    timeout never cools routing's `claude` rung, and routing's refusals never shut dispatch out."""
+    return f"dispatch:{name}"
+```
+
+- In `dispatch_turn`, the route's cooling becomes `lambda name: 1e9 if name in failed else cooling(_rung(name))`, and both `refuse(chosen["agent"], ...)` calls become `refuse(_rung(chosen["agent"]), ...)`. After the `except agents.AgentError` handler, add:
+
+```python
+        except Exception as error:  # noqa: BLE001 - an adapter bug is a failed attempt, never a lost turn
+            out["attempts"].append({"agent": chosen["agent"], "error": "failed", "detail": type(error).__name__})
+            failed[chosen["agent"]] = "failed"
+            continue
+```
+
+- In `check_agents`: `"cooling_s": round(cooling(_rung(name)))`, and the report key `"mode"` becomes `"policy_mode"`.
+
+- [ ] **Step 5: Run everything**
+
+Run: `env -u TYPESAFE_API_KEY -u OPENROUTER_API_KEY python3 -m unittest discover -s tests && python3 scripts/check_release.py`
+Expected: `OK` and `clean`, on python3 and on 3.9.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add jevkit/agents.py jevkit/dispatch.py tests/test_agents.py tests/test_dispatch.py
+git commit -m "agents: an empty directory, a minimal environment, no tools for claude; failures without output text"
+```
+
+---
+
+### Task 10e: A broken setting in a later file makes things stricter, never looser (review of Tasks 4b-8)
+
+**The problem.** A value of the wrong type kept the *previous file's* value, not a safe one. With `"enabled": true` in the shared file and `"enabled": "false"` in the profile's own file, the agent stayed enabled. `"privacy": null` kept `["public", "private"]`. Now a broken `enabled` means no, a broken agent `privacy` allows nothing, and a broken `profiles`, `default_privacy` or `jev_text_for` resets to the strictest value.
+
+**Files:**
+- Modify: `jevkit/dispatch.py` (`load_policy`)
+- Test: `tests/test_dispatch.py`
+
+- [ ] **Step 1: Write the failing tests** (append)
+
+```python
+class LayeringTests(unittest.TestCase):
+    def layers(self, shared, own):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for index, layer in enumerate((shared, own)):
+                path = Path(tmp) / f"{index}.json"
+                path.write_text(json.dumps(layer))
+                paths.append(path)
+            with mock.patch.object(dispatch, "policy_paths", return_value=paths):
+                return dispatch.load_policy()
+
+    def test_a_broken_no_in_the_profile_file_is_still_a_no(self):
+        for broken in ("false", 0, None, []):
+            loaded = self.layers({"agents": {"openai": {"enabled": True}}}, {"agents": {"openai": {"enabled": broken}}})
+            self.assertIs(loaded["agents"]["openai"]["enabled"], False, broken)
+
+    def test_a_broken_privacy_list_allows_nothing(self):
+        for broken in (None, ["public", None], "private,public"):
+            loaded = self.layers({}, {"agents": {"openai": {"privacy": broken}}})
+            expected = ["private,public"] if isinstance(broken, str) else []
+            self.assertEqual(loaded["agents"]["openai"]["privacy"], expected, broken)
+
+    def test_broken_privacy_settings_reset_to_the_strictest(self):
+        loaded = self.layers({"profiles": {"default": "public"}, "jev_text_for": ["public", "private"]},
+                             {"profiles": 5, "default_privacy": 7, "jev_text_for": {"x": 1}})
+        self.assertEqual((loaded["profiles"], loaded["default_privacy"], loaded["jev_text_for"]),
+                         ({}, "highly_sensitive", []))
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `python3 -m unittest tests.test_dispatch.LayeringTests -v`
+Expected: failures. The broken values keep the shared file's values.
+
+- [ ] **Step 3: In `load_policy`, handle a value that does not fit**
+
+Add above `load_policy`:
+
+```python
+# What a broken value becomes, where keeping the previous file's value could loosen privacy.
+_BROKEN_AGENT = {"enabled": False, "privacy": []}
+_BROKEN_TOP = {"profiles": {}, "default_privacy": "highly_sensitive", "jev_text_for": []}
+```
+
+In the agent loop, replace `if key not in _AGENT_SHAPE or _fits(_AGENT_SHAPE[key], value): merged[key] = value` with:
+
+```python
+                    if key not in _AGENT_SHAPE or _fits(_AGENT_SHAPE[key], value):
+                        merged[key] = value
+                    elif key in _BROKEN_AGENT:
+                        merged[key] = copy.deepcopy(_BROKEN_AGENT[key])   # a broken yes is a no
+```
+
+In the top-level loop, replace `if key == "agents" or (key in DEFAULT_POLICY and not _fits(DEFAULT_POLICY[key], value)): continue` with:
+
+```python
+            if key == "agents":
+                continue
+            if key in DEFAULT_POLICY and not _fits(DEFAULT_POLICY[key], value):
+                if key in _BROKEN_TOP:
+                    policy[key] = copy.deepcopy(_BROKEN_TOP[key])
+                continue
+```
+
+- [ ] **Step 4: Run everything, then commit**
+
+Run: `env -u TYPESAFE_API_KEY -u OPENROUTER_API_KEY python3 -m unittest discover -s tests && python3 scripts/check_release.py`
+Expected: `OK` and `clean`.
+
+```bash
+git add jevkit/dispatch.py tests/test_dispatch.py
+git commit -m "dispatch: a broken setting in a later file makes things stricter, never looser"
+```
+
+---
+
 ### Task 11: The Hermes plugin
 
 **Files:**
@@ -2922,6 +3478,24 @@ class MiddlewareTests(unittest.TestCase):
         with mock.patch.object(plugin, "_plugin_setting", lambda name: "on" if name == "mode" else None):
             result, following = self.call()
         self.assertEqual(following.calls, 0)
+
+    def test_a_session_that_failed_is_not_resumed(self):
+        self.mode("on")
+        self.answer = {**self.answer, "agent": "claude", "session": "sess-7"}
+        self.call(turn="t1")
+        self.answer = {"agent": "local", "reason": "every agent failed", "downgraded": True, "privacy": "private",
+                       "triage": {}, "attempts": [{"agent": "claude", "error": "failed"}]}
+        self.call(turn="t2")
+        self.call(turn="t3")
+        self.assertEqual(self.dispatched[2]["session"], "")
+
+    def test_a_message_made_of_parts_is_handed_over_as_text(self):
+        self.mode("shadow")
+        plugin._on_pre_llm_call(session_id="s9", turn_id="t1", user_message=[
+            {"type": "text", "text": "Vind de race"}, {"type": "image_url", "image_url": {"url": "data:..."}}])
+        plugin._on_llm_execution(request=dict(REQUEST), next_call=Next(), session_id="s9", turn_id="t1",
+                                 api_mode="chat_completions")
+        self.assertEqual(plugin._TURNS["s9"]["text"], "Vind de race\n[image]")
 
     def test_agent_sessions_are_bounded(self):
         self.mode("on")
@@ -3130,7 +3704,8 @@ def _completion(text: str, model: str) -> Any:
 
 def _on_pre_llm_call(session_id: str = "", turn_id: Any = None, user_message: Any = "",
                      parent_session_id: str = "", platform: str = "", **_: Any) -> Any:
-    text = user_message if isinstance(user_message, str) else json.dumps(user_message, default=str)[:6000]
+    # A message made of parts is handed over as its text, never as the JSON of its parts.
+    text = user_message if isinstance(user_message, str) else dispatch.relay.text_of(user_message)
     with _LOCK:
         if len(_TURNS) >= _MAX_SESSIONS:
             _TURNS.pop(next(iter(_TURNS)))
@@ -3171,6 +3746,9 @@ def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: st
         return next_call(request)
     turn["decision"] = decision
     _log({"mode": mode, "live": live, **_summary(decision)})
+    if any(attempt.get("agent") == "claude" for attempt in decision.get("attempts") or []):
+        with _LOCK:
+            _SESSIONS.pop(key, None)            # a session that failed is not resumed next turn
     if live and decision.get("agent") != dispatch.LOCAL and decision.get("text"):
         if decision.get("session"):
             with _LOCK:
@@ -3276,13 +3854,19 @@ Cover: what it does (the three parts), the example `dispatch.json` below, the pr
 ```
 
 Include these rollout steps:
-1. `jev dispatch check`
+1. `jev dispatch check`. It shows `policy_mode`, the mode written in dispatch.json. `/dispatch` without arguments shows the mode in force, since a switch or config.yaml can override the file.
 2. `/jev routing off` (one classifier per turn)
 3. `/dispatch shadow` and a day of `grep '"kind":"dispatch"' ~/.hermes/logs/jev-decisions.jsonl`
-4. `/dispatch on` with one agent enabled
+4. `/dispatch on` with one agent enabled. With only claude enabled, only coding turns leave, because claude takes repository work only unless `only_repo` is false.
 5. The others, one at a time
 
 Rollback is `/dispatch off`.
+
+Also state these, each in a sentence or two:
+- **Isolation.** Agents run in a fresh empty directory with a minimal environment. API keys are not passed on, so each CLI uses its own login. Claude runs with its file, shell and web tools disabled. Codex runs in its read-only sandbox, and the handoff asks it to read no files; it can still run read-only commands if it decides to, so the working directory is empty on purpose.
+- **Cooldowns.** They live in the shared ladder file under `dispatch:<agent>`, separate from routing's rungs. `jev ladder clear --rung dispatch:openai` reopens a seat early.
+- **Time.** A turn spends at most `turn_budget` (600 s) on agents. That keeps it under Hermes's 900 s idle warning (`agent.gateway_timeout_warning`).
+- **A secret.** A secret is a value (a key, a token, a password), not a word about one. The forms recognised are listed in `privacy.has_secret_value`.
 
 - [ ] **Step 2: Add the README bullet** (in "What leaves your machine", after the Routing bullet)
 
@@ -3300,16 +3884,19 @@ Rollback is `/dispatch off`.
 ```markdown
 **Receptionist dispatch: a hard turn goes to the agent that should answer it**
 
-- New `hermes-dispatch` plugin (off by default) and `jev dispatch`. On the first provider call of a turn, `llm_execution` middleware classifies the turn with Jev, applies a deterministic policy (privacy class, level, context window, cooldowns, order), and either lets the local call go ahead or hands the turn to Codex on a ChatGPT login, Claude Code, or OpenRouter. The answer comes back unchanged under one line naming its author. Shadow mode decides and logs only. A quota, auth or missing-program failure cools that agent for every lane through the ladder, a timeout cools it for five minutes, and the next agent or the local model answers. A turn spends at most `turn_budget` (15 minutes) on agents. The privacy class covers every turn a handoff would carry, not only the newest.
+- New `hermes-dispatch` plugin (off by default) and `jev dispatch`. On the first provider call of a turn, `llm_execution` middleware classifies the turn with Jev, applies a deterministic policy (privacy class, level, context window, cooldowns, order), and either lets the local call go ahead or hands the turn to Codex on a ChatGPT login, Claude Code, or OpenRouter. The answer comes back unchanged under one line naming its author. Shadow mode decides and logs only. A quota, auth or missing-program failure cools that agent for every lane through the ladder, under its own `dispatch:<agent>` name. A timeout cools it for five minutes. Then the next agent or the local model answers. A turn spends at most `turn_budget` (10 minutes) on agents. The privacy class covers every turn a handoff would carry, not only the newest. Agents run in an empty directory with a minimal environment, and claude runs without file, shell or web tools. A failure's detail never carries output text.
 - `route.judge_answers`, `route.clip_ask` and `route.is_risky` are extracted from `route.decide` with no change in behaviour, so routing and dispatch share one calibrated judgement.
 - Privacy for dispatch:
   - `privacy.has_secret_value` asks whether a credential value is present, not a word about one.
-  - `privacy.has_iban` finds an IBAN from any common country by its check digits.
+  - `privacy.has_iban` finds an IBAN from the whole registry by its check digits, grouped or not.
+  - Dutch mobile numbers in every usual spelling are now masked by `redact` as well.
   - `privacy.has_contact_details` reads addresses and phone numbers as people write them, not timestamps or git URLs.
   - Sensitive terms count in any form.
   - `dispatch.json` values of the wrong type are ignored; `"enabled": "false"` is not a yes.
   - One string where a list is expected is a list of one; an `argv` string is split like a command line.
-  - A turn with words about secrets sends Jev coarse features only, as routing does.
+  - A turn with words about secrets sends Jev coarse features only, as routing does. So do routing's `mode: "features"` and `private_profiles`.
+  - OpenRouter takes public turns only, by kind, whatever it is named.
+  - A broken setting in a later file makes things stricter: a broken `enabled` is a no, and a broken privacy list allows nothing.
 - The TRIAGE record follows the reasoning library's routing contract, so a local receptionist can later take Jev's place as the classifier (one classifier per turn).
 - `tests/test_turn.py` and `tests/test_question_shape.py` no longer depend on a real key being installed.
 ```
