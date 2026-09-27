@@ -595,3 +595,24 @@ class CheckAgentsTests(unittest.TestCase):
         dispatch.check_agents(pol, which=lambda program: seen.append(program), cooling=NOT_COOLING,
                               has_key=lambda: False)
         self.assertIn("/opt/codex/bin/codex", seen)
+
+
+class CliTests(unittest.TestCase):
+    def run_cli(self, *argv):
+        buffer = io.StringIO()
+        with mock.patch.object(cli.dispatch, "load_policy", return_value=dispatch.load_policy(NOWHERE)), \
+                contextlib.redirect_stdout(buffer):
+            code = cli.main(list(argv))
+        return code, json.loads(buffer.getvalue())
+
+    def test_a_highly_sensitive_turn_is_answered_here_without_asking_jev(self):
+        code, out = self.run_cli("dispatch", "--prompt", "hoi", "--privacy", "highly_sensitive")
+        self.assertEqual((code, out["agent"]), (0, "local"))
+
+    def test_check_runs_nothing_and_names_every_agent(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {"JEV_LADDER_STATE": str(Path(tmp) / "ladder.json")}), \
+                mock.patch.object(dispatch.keystore, "resolve", return_value=None):
+            code, out = self.run_cli("dispatch", "check")
+        self.assertEqual(code, 0)
+        self.assertEqual(set(out["agents"]), {"openai", "claude", "openrouter"})

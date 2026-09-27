@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from . import __version__, catalog, choose, client, compact, key_setup, keystore, ladder, mailbox, memo, plan, rerank, replay, route, search, skillpick, spend, supervise, triage
+from . import __version__, catalog, choose, client, compact, dispatch, key_setup, keystore, ladder, mailbox, memo, plan, rerank, replay, route, search, skillpick, spend, supervise, triage
 
 
 def _stdin_json() -> Any:
@@ -206,6 +206,22 @@ def cmd_route(args: argparse.Namespace) -> int:
         context_tokens=int(request.get("context_tokens") or args.context_tokens),
         has_images=bool(request.get("has_images") or args.has_images), profile=request.get("profile") or args.profile,
         pinned=bool(request.get("pinned")), timeout=args.timeout))
+
+
+def cmd_dispatch(args: argparse.Namespace) -> int:
+    """Which agent would answer a turn, and with --run, its answer. `check` runs nothing."""
+    policy = dispatch.load_policy()
+    if args.action == "check":
+        return _out(dispatch.check_agents(policy))
+    request = _stdin_json() if args.prompt is None else {"prompt": args.prompt}
+    prompt = str(request.get("prompt") or "")
+    profile = args.profile or "default"
+    if args.privacy:
+        policy = {**policy, "profiles": {**(policy.get("profiles") or {}), profile: args.privacy}}
+    messages = request.get("messages") or [{"role": "user", "content": prompt}]
+    return _out(dispatch.dispatch_turn(prompt, messages, profile=profile,
+                                       context_tokens=int(request.get("context_tokens") or 0),
+                                       interactive=not args.background, run=args.run, policy=policy))
 
 
 def cmd_rerank(args: argparse.Namespace) -> int:
@@ -725,6 +741,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--has-images", action="store_true")
     p.add_argument("--timeout", type=float, default=2.5)
     p.set_defaults(func=cmd_route)
+
+    p = sub.add_parser("dispatch", help="which agent answers a turn: local, openai, claude or openrouter; "
+                                        "--run hands it over, `check` shows what is set up")
+    p.add_argument("action", nargs="?", choices=["route", "check"], default="route")
+    p.add_argument("--prompt")
+    p.add_argument("--profile")
+    p.add_argument("--privacy", choices=list(dispatch.PRIVACY), help="treat the profile as this class for this call")
+    p.add_argument("--background", action="store_true", help="not an interactive chat turn")
+    p.add_argument("--run", action="store_true", help="actually hand the turn to the chosen agent")
+    p.set_defaults(func=cmd_dispatch)
 
     p = sub.add_parser("rerank", help="filter retrieved memory passages")
     p.set_defaults(func=cmd_rerank)
