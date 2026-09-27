@@ -1305,6 +1305,14 @@ _AGENT_SHAPE: Dict[str, Any] = {"kind": "", "enabled": False, "model": "", "priv
                                 "max_turns": 8, "timeout": 600, "cooldown": 1800, "context_tokens": 0, "argv": []}
 
 
+def _coerce(default: Any, value: Any) -> Any:
+    """One string where a list of strings is expected is a list of one, never dropped.
+
+    Dropping it would be the unsafe direction: `"sensitive_terms": "salaris"` would lose the term.
+    """
+    return [value] if isinstance(default, list) and isinstance(value, str) else value
+
+
 def _fits(default: Any, value: Any) -> bool:
     """Does a value from a file have the type of the default it would replace."""
     if isinstance(default, bool):
@@ -1330,10 +1338,14 @@ In `load_policy`, only a fitting value lands. Replace the two loops with:
                     continue
                 merged = dict(policy["agents"].get(name, {}))
                 for key, value in settings.items():
+                    if key in _AGENT_SHAPE:
+                        value = _coerce(_AGENT_SHAPE[key], value)
                     if key not in _AGENT_SHAPE or _fits(_AGENT_SHAPE[key], value):
                         merged[key] = value
                 policy["agents"][name] = merged
         for key, value in layer.items():
+            if key in DEFAULT_POLICY:
+                value = _coerce(DEFAULT_POLICY[key], value)
             if key == "agents" or (key in DEFAULT_POLICY and not _fits(DEFAULT_POLICY[key], value)):
                 continue
             # One level deep, so a file that changes one order or one profile keeps the others.
@@ -1363,8 +1375,14 @@ Tests (append to `PolicyFileTests`):
         defaults = dispatch.load_policy(NOWHERE)
         for key in ("frontier_order", "tier_to_niveau", "handoff", "turn_budget"):
             self.assertEqual(loaded[key], defaults[key], key)
-        self.assertNotIn("argv", loaded["agents"]["claude"])
+        self.assertEqual(loaded["agents"]["claude"]["argv"], ["claude -p"])     # one string: a list of one
         self.assertEqual((loaded["agents"]["claude"]["timeout"], loaded["agents"]["claude"]["model"]), (600, "opus"))
+
+    def test_one_term_given_as_a_string_is_kept_not_dropped(self):
+        loaded = self.load({"sensitive_terms": "salaris", "profiles": {"coding": "public"}})
+        self.assertEqual(loaded["sensitive_terms"], ["salaris"])
+        self.assertEqual(dispatch.privacy_class("Wat is mijn salaris?", profile="coding", policy=loaded)[0],
+                         "highly_sensitive")
 ```
 
 - [ ] **Step 5: Guard the network in the Task 0 modules**
