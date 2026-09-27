@@ -253,12 +253,16 @@ each CLI uses its own login. The Claude login token from `claude setup-token`
 (`CLAUDE_CODE_OAUTH_TOKEN`) does pass, because it is the subscription login itself, and so do
 the proxy settings.
 
-Codex gets a fresh empty directory for every turn. Claude gets one of its own under the temp
-directory (`jev-claude-<uid>/work`), so the next turn resumes its session there. That
-directory is used only while it is a real directory, yours, closed to other users' writes, and
-empty. Otherwise claude runs in a fresh one and starts a new session: isolation beats
-continuity. It stays under the temp directory, never under your home, because Claude Code
-reads every `CLAUDE.md` from its working directory up to `/`.
+Codex gets a fresh empty directory for every turn. Claude gets one of its own,
+`jev-claude-<uid>/work`, so the next turn resumes its session there. It lives in your runtime
+directory (`XDG_RUNTIME_DIR`, normally `/run/user/<uid>`) when that is yours alone, and in
+the temp directory otherwise. The directory is used only while it is a real directory, yours,
+closed to other users' writes, and empty. Otherwise claude runs in a fresh one and starts a
+new session: isolation beats continuity.
+
+Where the directory lives matters because Claude Code reads every `CLAUDE.md` from its
+working directory up to `/`. Under your home it would read yours. Under /tmp it would read
+one that another user of the machine left there. The runtime directory avoids both.
 
 Claude runs with no tools at all (`--tools ""`) and no MCP servers (`--strict-mcp-config`).
 `--disallowedTools` stays as the fallback for a CLI without `--tools`.

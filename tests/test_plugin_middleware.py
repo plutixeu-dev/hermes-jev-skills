@@ -216,6 +216,13 @@ class ProfileTests(unittest.TestCase):
             self.assertEqual(plugin._state_path(), self.home / "jev" / "state.json")
             self.assertEqual(plugin._state_path(shared=True), self.root / "jev" / "state.json")
 
+    def test_a_switch_file_that_is_not_utf8_reads_as_no_switches(self):
+        """dispatch reads this file too, to stand aside for routing: it must not raise."""
+        path = self.root / "jev" / "state.json"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'{"routing": "\xff"}')
+        self.assertEqual(plugin._read(path), {})
+
     def test_without_an_override_hermes_home_decides(self):
         with self.constants(None):
             self.assertEqual(plugin._profile(), "default")

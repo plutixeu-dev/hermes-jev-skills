@@ -252,9 +252,39 @@ class ClaudeDirectoryTests(unittest.TestCase):
             return subprocess.CompletedProcess(argv, 0, claude_json(), "")
 
         for patch in (mock.patch.object(tempfile, "tempdir", tmp.name),
-                      mock.patch.object(agents.subprocess, "run", fake_run)):
+                      mock.patch.object(agents.subprocess, "run", fake_run),
+                      mock.patch.dict(os.environ)):
             patch.start()
             self.addCleanup(patch.stop)
+        os.environ.pop("XDG_RUNTIME_DIR", None)            # this machine's own must not decide these tests
+
+    def runtime_dir(self, mode):
+        run = self.tmp / "run"
+        run.mkdir(mode=0o700)
+        os.chmod(run, mode)
+        os.environ["XDG_RUNTIME_DIR"] = str(run)
+        return run
+
+    def test_the_users_own_runtime_directory_comes_before_the_shared_temp_directory(self):
+        """Claude Code reads every CLAUDE.md up to `/`, and anyone can leave one in /tmp."""
+        run = self.runtime_dir(0o700)
+        agents.run_claude(PROMPT)
+        self.assertEqual(self.seen[-1]["cwd"], str(run / f"jev-claude-{self.uid}" / "work"))
+
+    def test_a_runtime_directory_others_can_enter_is_passed_over(self):
+        self.runtime_dir(0o755)
+        agents.run_claude(PROMPT)
+        self.assertEqual(self.seen[-1]["cwd"], str(self.work))
+
+    def test_a_fresh_directory_also_goes_under_the_users_own_runtime_directory(self):
+        run = self.runtime_dir(0o700)
+        busy = run / f"jev-claude-{self.uid}" / "work"
+        busy.mkdir(parents=True, mode=0o700)
+        (busy / "notes.txt").write_text("x")
+        result = agents.run_claude(PROMPT, session="sess-1")
+        self.assertTrue(self.seen[-1]["cwd"].startswith(str(run)), self.seen[-1]["cwd"])
+        self.assertNotEqual(self.seen[-1]["cwd"], str(busy))
+        self.assertEqual(result.session, "")
 
     def assert_fell_back(self, result):
         self.assertNotEqual(self.seen[-1]["cwd"], str(self.work))

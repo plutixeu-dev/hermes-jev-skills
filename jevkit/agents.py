@@ -176,20 +176,38 @@ def run_codex(prompt: str, *, model: str = "", timeout: float = 600.0, argv: Opt
     return Result(text=text, model=model)
 
 
+def _private_base() -> Path:
+    """Where claude's directories go: this user's runtime directory when it is really theirs.
+
+    Claude Code reads every CLAUDE.md from its working directory up to `/`, and anyone on the
+    machine can leave one in /tmp. XDG_RUNTIME_DIR (/run/user/<uid>) is closed to other users;
+    the temp directory is the fallback where there is none.
+    """
+    runtime, getuid = os.environ.get("XDG_RUNTIME_DIR"), getattr(os, "getuid", None)
+    if runtime and getuid is not None:
+        try:
+            info = os.stat(runtime)
+            if stat.S_ISDIR(info.st_mode) and info.st_uid == getuid() and not info.st_mode & 0o077:
+                return Path(runtime)
+        except OSError:
+            pass
+    return Path(tempfile.gettempdir())
+
+
 def _claude_workdir() -> Optional[str]:
     """The one empty directory claude runs in, or None when it cannot be trusted.
 
     One directory, so `--resume` finds a session where it was made: a fresh directory per call made
     resuming depend on a scan across projects that older CLIs lack, and left one
-    `~/.claude/projects/` folder per turn. Under the temp directory, never under `~`: Claude Code
-    reads every CLAUDE.md from its working directory up to `/`. Used only while it is a real
+    `~/.claude/projects/` folder per turn. Never under `~`, because Claude Code reads every
+    CLAUDE.md from its working directory up to `/`. Used only while it is a real
     directory (not a symlink), this user's own, closed to others' writes, and empty.
     """
     getuid = getattr(os, "getuid", None)
     if getuid is None:
         return None
     uid = getuid()
-    work = Path(tempfile.gettempdir()) / f"jev-claude-{uid}" / "work"
+    work = _private_base() / f"jev-claude-{uid}" / "work"
     try:
         for path in (work.parent, work):
             with contextlib.suppress(FileExistsError):
@@ -219,7 +237,8 @@ def run_claude(prompt: str, *, model: str = "", session: str = "", max_turns: in
     fresh = runner is None and workdir is None
     if fresh:
         session = ""
-    with (tempfile.TemporaryDirectory(prefix="jev-claude-") if fresh else contextlib.nullcontext(workdir)) as cwd:
+    scratch = tempfile.TemporaryDirectory(prefix="jev-claude-", dir=str(_private_base())) if fresh else None
+    with (scratch if scratch is not None else contextlib.nullcontext(workdir)) as cwd:
         done = _call(fill(argv or CLAUDE_ARGV, model=model, session=session, max_turns=max_turns,
                           disallowed=CLAUDE_DISALLOWED), prompt, timeout, runner, cwd)
     try:

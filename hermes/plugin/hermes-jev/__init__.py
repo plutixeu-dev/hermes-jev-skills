@@ -56,7 +56,7 @@ def _read(path: Path) -> Dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):      # ValueError: bad JSON, or bytes that are not UTF-8
         return {}
 
 

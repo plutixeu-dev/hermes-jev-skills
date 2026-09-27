@@ -965,6 +965,13 @@ class LadderTests(unittest.TestCase):
     def test_the_top_seat_is_used_while_it_is_free(self):
         self.assertEqual(self.choose()["rung"], "astra")
 
+    def test_a_state_file_that_is_not_utf8_reads_as_empty_and_is_replaced(self):
+        """dispatch reads this file on every handed-off turn: a broken one must not end the turn."""
+        (Path(self.tmp.name) / "ladder.json").write_bytes(b'{"cooldowns": "\xff\xfe"}')
+        self.assertEqual(ladder.cooling("astra"), 0.0)
+        ladder.refuse("astra", "429 rate limited", cooldown=1800)
+        self.assertGreater(ladder.cooling("astra"), 0)
+
     def test_a_refusal_steps_down_and_is_shared_through_the_state_file(self):
         ladder.refuse("astra", "429 rate limited", cooldown=1800)
         self.assertEqual(self.choose()["rung"], "claude")
