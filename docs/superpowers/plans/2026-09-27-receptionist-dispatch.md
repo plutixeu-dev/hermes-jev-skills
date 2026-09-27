@@ -2588,6 +2588,173 @@ git commit -m "cli: jev dispatch shows who would answer a turn, and check shows 
 
 ---
 
+### Task 10b: Review fixes (review of Tasks 2b-4)
+
+The review found these problems, fixed here:
+1. **Jev ignored routing's own privacy settings.** `classify_with_jev` did not honour `mode: "features"` or `private_profiles` in routing.json, so a turn routing sends as features reached Jev as text.
+2. **The public-only rule followed a name.** It applied to whatever `last_resort` named, not to OpenRouter itself, so `"last_resort": ""` with openrouter in an order let private turns out. The rule from the design is: private turns go local or to subscription routes, never to OpenRouter.
+3. **IBANs from TR, UA, RS, BA and more were missed.** Separately, the IBAN window joined the next words, so about 1% of sentences with an IBAN-like token (for example "es2023 so that …") counted as an IBAN.
+4. **Two numbers crashed the code.** `"context_tokens": 1e999` crashed `_int`, and `context_tokens=None` crashed `classify_with_jev`.
+5. **Your own terms were not normalised.** A decomposed "reïntegratie" never matched.
+6. **Answers with a missing inner field crashed** instead of failing open.
+
+**Files:**
+- Modify: `jevkit/dispatch.py` (`_int`, `_skip`, `privacy_class`, `classify_with_jev` and its call in `dispatch_turn`)
+- Modify: `jevkit/privacy.py` (`_IBAN_LENGTHS`, `_IBAN_START` becomes `_IBAN_CANDIDATE`, `has_iban`)
+- Test: `tests/test_dispatch.py`
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `ClassifyTests`:
+
+```python
+    def test_routing_set_to_features_only_is_honoured(self):
+        wire = Wire()
+        config = {**dispatch.route.load_config(NOWHERE), "mode": "features"}
+        self.classify(text="Rewrite the scheduler loop", transport=wire, config=config)
+        self.assertNotIn("Rewrite the scheduler loop", json.dumps(wire.bodies))
+
+    def test_a_private_profile_in_routing_sends_features(self):
+        wire = Wire()
+        config = {**dispatch.route.load_config(NOWHERE), "private_profiles": ["werk"]}
+        self.classify(text="Rewrite the scheduler loop", transport=wire, config=config, profile="werk")
+        self.assertNotIn("Rewrite the scheduler loop", json.dumps(wire.bodies))
+
+    def test_missing_inner_answers_fail_open(self):
+        record = self.classify(answers={"difficulty": {"score": 1}, "kind": {}, "costly_mistake": {}})
+        self.assertEqual((record["niveau"], record["source"]), ("standard", "fail_open"))
+
+    def test_no_token_count_is_zero(self):
+        self.assertEqual(self.classify(klass="highly_sensitive", context_tokens=None)["context_tokens"], 0)
+```
+
+Append to `ChooseRouteTests`:
+
+```python
+    def test_openrouter_takes_public_turns_only_under_any_name(self):
+        pol = policy(openrouter={"enabled": True, "model": "x/y", "privacy": ["public", "private"]})
+        pol["last_resort"] = ""
+        pol["frontier_order"] = {"repo": ["openrouter"], "default": ["openrouter"]}
+        self.assertEqual(self.route(triage(privacy="private"), pol)["agent"], "local")
+        self.assertEqual(self.route(triage(privacy="public"), pol)["agent"], "openrouter")
+
+    def test_an_endless_window_is_no_window(self):
+        pol = policy(openai={"enabled": True, "context_tokens": float("inf")})
+        self.assertEqual(self.route(triage(), pol)["agent"], "openai")
+```
+
+Append to `PrivacyTermTests`:
+
+```python
+    def test_ibans_from_the_whole_registry(self):
+        for text in ("TR33 0006 1005 1978 6457 8413 26", "RS35 2600 0560 1001 6113 79",
+                     "UA21 3223 1300 0002 6007 2335 6600 1", "NL91-ABNA-0417-1643-00"):
+            self.assertTrue(dispatch.privacy.has_iban(text), text)
+
+    def test_a_version_string_followed_by_words_is_not_an_iban(self):
+        self.assertFalse(dispatch.privacy.has_iban(
+            "Set the target to es2023 so that optional chaining works in older browsers"))
+
+    def test_your_own_terms_are_normalised_like_the_text(self):
+        policy = {**POLICY, "sensitive_terms": ["rei\u0308ntegratie"]}    # i + combining diaeresis
+        self.assertEqual(dispatch.privacy_class("Het reïntegratietraject loopt", profile="coding",
+                                                policy=policy)[0], "highly_sensitive")
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `python3 -m unittest tests.test_dispatch -v`
+Expected: failures on the features, private-profile, OpenRouter, IBAN-registry, version-string and normalisation tests. Errors on the missing inner answers, None, and infinite window tests.
+
+- [ ] **Step 3: Change `jevkit/privacy.py`**
+
+Replace `_IBAN_LENGTHS`, `_IBAN_START` and `has_iban` with:
+
+```python
+# The IBAN registry: country and length. A wrong or missing entry only means a miss for that
+# country: the check digits decide, so a longer table adds no false positives.
+_IBAN_LENGTHS = {
+    "AD": 24, "AE": 23, "AL": 28, "AT": 20, "AZ": 28, "BA": 20, "BE": 16, "BG": 22, "BH": 22, "BI": 27,
+    "BR": 29, "BY": 28, "CH": 21, "CR": 22, "CY": 28, "CZ": 24, "DE": 22, "DJ": 27, "DK": 18, "DO": 28,
+    "EE": 20, "EG": 29, "ES": 24, "FI": 18, "FK": 18, "FO": 18, "FR": 27, "GB": 22, "GE": 22, "GI": 23,
+    "GL": 18, "GR": 27, "GT": 28, "HR": 21, "HU": 28, "IE": 22, "IL": 23, "IQ": 23, "IS": 26, "IT": 27,
+    "JO": 30, "KW": 30, "KZ": 20, "LB": 28, "LC": 32, "LI": 21, "LT": 20, "LU": 20, "LV": 21, "LY": 25,
+    "MC": 27, "MD": 24, "ME": 22, "MK": 19, "MN": 20, "MR": 27, "MT": 31, "MU": 30, "NI": 28, "NL": 18,
+    "NO": 15, "OM": 23, "PK": 24, "PL": 28, "PS": 29, "PT": 25, "QA": 29, "RO": 24, "RS": 22, "RU": 33,
+    "SA": 24, "SC": 31, "SD": 18, "SE": 24, "SI": 19, "SK": 24, "SM": 27, "SO": 23, "ST": 25, "SV": 28,
+    "TL": 23, "TN": 24, "TR": 26, "UA": 29, "VA": 22, "VG": 24, "XK": 20, "YE": 30,
+}
+# Written whole, or in groups of four split by one space or hyphen, and ending at a word
+# boundary: the next word never joins the number, which is what let "es2023 so that …" pass.
+_IBAN_CANDIDATE = re.compile(
+    r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,3})?(?![A-Z0-9])")
+
+
+def has_iban(text: str) -> bool:
+    """An IBAN from the registry, grouped or not, in any case.
+
+    The check digits decide, as Luhn does for cards: a code that merely looks like an IBAN
+    almost never passes mod 97.
+    """
+    for match in _IBAN_CANDIDATE.finditer(normalize(text).upper()):
+        compact = re.sub(r"[ -]", "", match.group(0))
+        if len(compact) != _IBAN_LENGTHS.get(compact[:2], -1) or not compact.isascii():
+            continue
+        if int("".join(str(int(char, 36)) for char in compact[4:] + compact[:4])) % 97 == 1:
+            return True
+    return False
+```
+
+- [ ] **Step 4: Change `jevkit/dispatch.py`**
+
+(a) In `_int`, catch `(TypeError, ValueError, OverflowError)`.
+
+(b) In `_skip`, replace the last-resort line with:
+
+```python
+    if (last_resort or agent.get("kind") == "openrouter") and klass != "public":
+        return "OpenRouter and the last resort take public turns only"
+```
+
+The existing test `test_nothing_enabled_is_a_visible_downgrade` is unaffected. In `test_the_last_resort_takes_public_turns_only_whatever_its_settings_say`, the skipped reason text changes but the test checks only the agent.
+
+(c) In `privacy_class`, match `privacy.normalize(term)` instead of `term`: `if _mentions(lowered, privacy.normalize(term)):`.
+
+(d) Give `classify_with_jev` a keyword parameter `profile: Optional[str] = None` and pass `profile=profile` from `dispatch_turn`. Make the record's token count `max(0, _int(context_tokens))`. Replace the `features_only` line with:
+
+```python
+    # Jev reads text only where routing would too: never for a private profile or routing set to
+    # features, and never for a turn that looks like it holds a secret (privacy.has_secret_value
+    # may still let a question about secrets leave, as text for an agent, not for Jev).
+    features_only = (privacy_class not in (policy.get("jev_text_for") or [])
+                     or privacy.is_sensitive(inner)
+                     or config.get("mode") == "features"
+                     or (profile or "default") in (config.get("private_profiles") or []))
+```
+
+Then wrap the judgement:
+
+```python
+    try:
+        judged = route.judge_answers(answers, config, risky=route.is_risky(inner), features_only=features_only)
+    except (KeyError, TypeError, ValueError):
+        return {**record, "source": "fail_open", "why": "routing answers incomplete"}
+```
+
+- [ ] **Step 5: Run everything**
+
+Run: `env -u TYPESAFE_API_KEY -u OPENROUTER_API_KEY python3 -m unittest discover -s tests && python3 scripts/check_release.py`
+Expected: `OK` and `clean`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add jevkit/dispatch.py jevkit/privacy.py tests/test_dispatch.py
+git commit -m "dispatch: Jev honours routing's privacy settings; OpenRouter public-only by kind; IBAN registry"
+```
+
+---
+
 ### Task 11: The Hermes plugin
 
 **Files:**
