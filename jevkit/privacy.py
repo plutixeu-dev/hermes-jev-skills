@@ -99,6 +99,35 @@ def has_contact_details(text: str) -> bool:
     return bool(_EMAIL.search(probe) or _PHONE.search(probe) or _INTL_PHONE.search(probe))
 
 
+# IBAN lengths per country, for the countries a Dutch household meets. The length is what keeps
+# the next word out of the number when an IBAN is written in groups of four.
+_IBAN_LENGTHS = {"AD": 24, "AT": 20, "BE": 16, "BG": 22, "CH": 21, "CY": 28, "CZ": 24, "DE": 22, "DK": 18,
+                 "EE": 20, "ES": 24, "FI": 18, "FR": 27, "GB": 22, "GI": 23, "GR": 27, "HR": 21, "HU": 28,
+                 "IE": 22, "IS": 26, "IT": 27, "LI": 21, "LT": 20, "LU": 20, "LV": 21, "MC": 27, "MT": 31,
+                 "NL": 18, "NO": 15, "PL": 28, "PT": 25, "RO": 24, "SE": 24, "SI": 19, "SK": 24, "SM": 27}
+_IBAN_START = re.compile(r"\b([A-Z]{2})(\d{2})")
+
+
+def has_iban(text: str) -> bool:
+    """An IBAN from one of those countries, grouped or not, in any case.
+
+    The check digits decide, as Luhn does for cards: a code that merely looks like an IBAN
+    almost never passes mod 97.
+    """
+    probe = normalize(text).upper()
+    for match in _IBAN_START.finditer(probe):
+        length = _IBAN_LENGTHS.get(match.group(1))
+        if not length:
+            continue
+        compact = probe[match.start():match.start() + length + length // 4 + 2].replace(" ", "")[:length]
+        if len(compact) != length or not (compact.isascii() and compact.isalnum()):
+            continue
+        rearranged = compact[4:] + compact[:4]
+        if int("".join(str(int(char, 36)) for char in rearranged)) % 97 == 1:
+            return True
+    return False
+
+
 def redact(text: str, limit: int = 4000) -> str:
     out = normalize(text)
     # Hold tracking numbers aside so the phone rule cannot reach their digits, then put

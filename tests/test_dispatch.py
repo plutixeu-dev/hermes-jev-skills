@@ -101,3 +101,29 @@ class PrivacyClassTests(unittest.TestCase):
         policy = {**POLICY, "sensitive_terms": ["salaris"]}
         self.assertEqual(self.klass("Wat is mijn salaris?", policy=policy), "highly_sensitive")
         self.assertEqual(self.klass("Wat staat er in het dossier?", policy=policy), "highly_sensitive")
+
+
+class PrivacyTermTests(unittest.TestCase):
+    def klass(self, text):
+        return dispatch.privacy_class(text, profile="coding", policy=POLICY)[0]
+
+    def test_plurals_and_compounds_count(self):
+        for text in ("Vat de gespreksverslagen samen", "Sorteer de dossiers", "Open het patiëntendossier",
+                     "Wat staat er in het zorgdossier?", "Maak een behandelplan"):
+            self.assertEqual(self.klass(text), "highly_sensitive", text)
+
+    def test_the_english_verb_diagnose_is_an_ordinary_debugging_word(self):
+        self.assertEqual(self.klass("Help me diagnose why the build fails"), "public")
+
+    def test_a_short_term_counts_as_a_whole_word_only(self):
+        self.assertEqual(self.klass("Zet het BSN-nummer in het formulier"), "highly_sensitive")
+        self.assertEqual(self.klass("Rename the absnt flag"), "public")
+
+    def test_an_iban_from_any_country_in_any_case(self):
+        for text in ("Maak over naar BE71 0961 2345 6769", "rekening nl91 abna 0417 1643 00 graag",
+                     "DE89370400440532013000", "GB82 WEST 1234 5698 7654 32"):
+            self.assertEqual(self.klass(text), "highly_sensitive", text)
+
+    def test_a_code_that_only_looks_like_an_iban_is_not_one(self):
+        self.assertFalse(dispatch.privacy.has_iban("NL12 ABNA 0417 1643 00"))
+        self.assertFalse(dispatch.privacy.has_iban("Libanon, AB12 CDEF, DE12 3456"))

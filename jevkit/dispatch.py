@@ -81,14 +81,22 @@ def parse_triage(text: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
 
 
 # Words that put someone else's health, money, record or file into the turn. They make a turn
-# highly sensitive: only this machine may answer it. Deliberately not "client" or "token": in
-# a coding chat those are ordinary words, and a gate that fires on every other coding turn
-# gets switched off. dispatch.json can add terms (`sensitive_terms`); it never removes these.
+# highly sensitive: only this machine may answer it. A long term counts anywhere, so plurals and
+# compounds do too ("dossiers", "zorgdossier"); a short one only as a whole word. Deliberately
+# not "client", "token" or "diagnose": in a coding chat those are ordinary words, and a gate that
+# fires on every other coding turn gets switched off. dispatch.json can add terms
+# (`sensitive_terms`); it never removes these.
 DEFAULT_SENSITIVE_TERMS = (
-    "cliënt", "cliënten", "patiënt", "patiënten", "dossier", "bsn", "burgerservicenummer", "iban",
-    "diagnose", "medicatie", "strafblad", "schulden", "gespreksverslag",
+    "cliënt", "patiënt", "dossier", "gespreksverslag", "behandelplan", "anamnese", "medicatie",
+    "strafblad", "schulden", "burgerservicenummer", "bsn", "iban",
 )
-_IBAN = re.compile(r"\bNL\d{2}\s?[A-Z]{4}(?:\s?\d){10}\b")
+
+
+def _mentions(lowered: str, term: str) -> bool:
+    term = term.lower()
+    if len(term) >= 6:
+        return term in lowered
+    return re.search(r"(?<!\w)" + re.escape(term) + r"(?!\w)", lowered) is not None
 
 
 def privacy_class(text: str, *, profile: Optional[str], policy: Dict[str, Any]) -> Tuple[str, str]:
@@ -106,9 +114,9 @@ def privacy_class(text: str, *, profile: Optional[str], policy: Dict[str, Any]) 
         return "highly_sensitive", "looks like it holds a secret"
     lowered = probe.lower()
     for term in DEFAULT_SENSITIVE_TERMS + tuple(policy.get("sensitive_terms") or ()):
-        if re.search(r"(?<!\w)" + re.escape(str(term).lower()) + r"(?!\w)", lowered):
+        if _mentions(lowered, str(term)):
             return "highly_sensitive", f"mentions {term}"
-    if _IBAN.search(probe):
+    if privacy.has_iban(probe):
         return "highly_sensitive", "holds an IBAN"
     if base == "public" and privacy.has_contact_details(probe):
         return "private", "holds contact details"
