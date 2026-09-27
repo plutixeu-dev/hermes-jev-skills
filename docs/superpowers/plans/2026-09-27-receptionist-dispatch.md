@@ -3322,6 +3322,7 @@ The review found these problems in `jev dispatch` and the time budget:
 - `remaining` was not capped at the budget.
 - A negative agent `timeout` started the CLI and killed it at once.
 - A timeout caused by the turn budget, not by the agent, cooled the seat for every lane.
+- A policy without `turn_budget` fell back to 900 s, not the default 600 s.
 
 This task runs after Task 10e, so the refuse calls already use `_rung(...)`.
 
@@ -3397,10 +3398,11 @@ This task runs after Task 10e, so the refuse calls already use `_rung(...)`.
         def slow(argv, stdin_text, timeout):
             raise subprocess.TimeoutExpired("codex", timeout)
 
-        ticks = iter([0.0, 0.0, 0.0, 0.0])
-        self.turn(pol, runners={"codex": slow}, clock=lambda: next(ticks))
+        self.turn(pol, runners={"codex": slow}, clock=lambda: 0.0)
         self.assertEqual(self.refused, [])
 ```
+
+The existing `test_a_timeout_cools_the_seat_briefly` must keep passing. With the defaults (`turn_budget` 600, agent `timeout` 600) the first agent gets a hair under 600 s, and that timeout is the agent's own.
 
 - [ ] **Step 2: Run them and watch them fail**
 
@@ -3431,7 +3433,15 @@ def _agent_limit(settings: Dict[str, Any]) -> float:
 
 In `run_agent`, replace the two limit lines with `limit = _agent_limit(settings)` and `timeout = min(limit, timeout) if timeout is not None else limit`.
 
-In `dispatch_turn`, move the budget check *before* `if not run:`, and cap it:
+Next to `_BUDGET_FLOOR`:
+
+```python
+_OWN_SHARE = 0.9          # a timeout is the agent's own when it had at least 90% of its own limit
+```
+
+In `dispatch_turn`, the fallback budget is the default's 600 s: `budget = float(_int(policy.get("turn_budget"), 600))`.
+
+Move the budget check *before* `if not run:`, and cap it:
 
 ```python
         remaining = min(budget, budget - (clock() - started))
@@ -3443,10 +3453,10 @@ In `dispatch_turn`, move the budget check *before* `if not run:`, and cap it:
             return {**out, **chosen, "would_send_chars": len(prompt)}
 ```
 
-The timeout branch cools only when the agent itself ran out:
+The timeout branch cools only when the agent itself ran out. A strict `remaining >= _agent_limit(settings)` never cools with the defaults: the first agent gets the budget minus the time Jev took, just under its own 600 s. That was found in the dry run after Task 10d. The share keeps that case the agent's own:
 
 ```python
-            elif error.code == "timeout" and remaining >= _agent_limit(settings):
+            elif error.code == "timeout" and remaining >= _OWN_SHARE * _agent_limit(settings):
 ```
 
 - [ ] **Step 4: In `jevkit/cli.py`, replace the body of `cmd_dispatch` after the `check` branch with:**
