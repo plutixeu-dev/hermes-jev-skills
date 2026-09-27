@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import catalog as catalog_mod
-from . import ladder, privacy
+from . import client, ladder, privacy, route
 
 TYPES = ("EXPLAIN", "CREATE", "CHANGE", "FIX", "DECIDE", "RESEARCH", "REVIEW", "TALK")
 EXITS = ("PROCEED", "ASSUME", "ASK", "ESCALATE")
@@ -267,3 +267,49 @@ def choose_route(triage: Dict[str, Any], policy: Dict[str, Any], *,
                 "reason": f"frontier work for {name}" + (" (last resort)" if name == last else ""),
                 "considered": considered, "downgraded": False}
     return _local("no frontier agent may take this turn; this machine answers", considered, downgraded=True)
+
+
+_KIND_TO_TYPE = {"coding": "CHANGE", "writing": "CREATE", "research": "RESEARCH", "general": "EXPLAIN"}
+
+
+def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], context_tokens: int = 0,
+                      interactive: bool = True, config: Optional[Dict[str, Any]] = None,
+                      transport: Optional[client.Transport] = None, timeout: float = 2.5,
+                      answers: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """One TRIAGE record from Jev's three routing answers, judged by the router's own rules.
+
+    Jev is never asked about a highly sensitive turn. For a class not in `jev_text_for` Jev reads
+    coarse features only, never the text, as a private profile does in routing. Jev down, slow,
+    or answering in a shape we cannot read: niveau `standard`, which the policy keeps here.
+    """
+    record: Dict[str, Any] = {"type": "EXPLAIN", "exit": "PROCEED", "signals": [], "niveau": "standard",
+                              "privacy": privacy_class, "context_tokens": max(0, int(context_tokens)),
+                              "repo_werk": False, "interactief": bool(interactive)}
+    if privacy_class not in PRIVACY or privacy_class == "highly_sensitive":
+        return {**record, "privacy": "highly_sensitive", "source": "policy",
+                "why": "highly sensitive: Jev is not asked"}
+    config = config or route.load_config()
+    inner = route.unwrap(text, config)
+    limit = int(config.get("ask_chars", 2500))
+    features_only = privacy_class not in (policy.get("jev_text_for") or [])
+    if answers is None:
+        state = route.state_for(route.clip_ask(inner, limit), context_tokens=context_tokens,
+                                private=features_only, limit=limit)
+        try:
+            answers = client.ask(state, route.questions(), timeout=timeout, transport=transport)["answers"]
+        except client.JevError as error:
+            return {**record, "source": "fail_open", "why": f"Jev unavailable ({error.code})"}
+    if not all(isinstance(answers.get(name), dict) for name in ("difficulty", "kind", "costly_mistake")):
+        return {**record, "source": "fail_open", "why": "routing answers incomplete"}
+    judged = route.judge_answers(answers, config, risky=route.is_risky(inner), features_only=features_only)
+    jev = {key: judged[key] for key in ("tier", "specialty", "confidence", "difficulty", "stakes")}
+    if judged["tier"] is None:
+        return {**record, "niveau": "tiny", "source": "jev", "why": judged["reason"], "jev": jev}
+    niveau = (policy.get("tier_to_niveau") or {}).get(judged["tier"], "standard")
+    record.update(type=_KIND_TO_TYPE.get(judged["specialty"], "EXPLAIN"),
+                  niveau=niveau if niveau in NIVEAUS else "standard",
+                  repo_werk=judged["specialty"] == "coding", source="jev", why=judged["reason"], jev=jev)
+    if record["niveau"] == "frontier":
+        record.update(exit="ESCALATE", signals=["G8"],
+                      reason=f"Jev judged this {judged['tier']} {judged['specialty']} work")
+    return record

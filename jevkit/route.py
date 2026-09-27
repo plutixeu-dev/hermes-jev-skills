@@ -510,6 +510,54 @@ def state_for(ask: str, *, context_tokens: int = 0, private: bool = False, limit
     return {"user_turn": privacy.redact(ask, limit + 50), "context": _features(ask, context_tokens)["context"]}
 
 
+def clip_ask(inner: str, limit: int) -> str:
+    """What Jev reads of a long turn: its opening and, mostly, its end."""
+    return inner if len(inner) <= limit else inner[:limit // 4] + "\n[…]\n" + inner[-(limit - limit // 4):]
+
+
+def is_risky(text: str) -> bool:
+    """Risk words anywhere in the whole turn. Read on the whole text, never the clipped copy."""
+    return bool(_HARD_RISK.search(privacy.normalize(text)))
+
+
+def judge_answers(answers: Mapping[str, Any], config: Mapping[str, Any], *, risky: bool,
+                  features_only: bool) -> Dict[str, Any]:
+    """Tier and specialty from Jev's three answers: the policy `decide` has always applied.
+
+    `tier` is None when Jev is unsure about a harmless turn: nothing earned a change.
+    """
+    difficulty, confidence = answers["difficulty"]["score"], answers["difficulty"]["confidence"]
+    stakes = answers["costly_mistake"]["noul"]
+    spread = answers["difficulty"].get("probabilities") or {}
+    if spread:
+        p_simple, p_hard = spread.get(0, 0.0), spread.get(2, 0.0) + spread.get(3, 0.0)
+    else:                      # no spread returned: fall back to the averaged score, conservatively
+        p_simple, p_hard = float(difficulty < 0.5), float(difficulty >= 2.25)
+    judged: Dict[str, Any] = {"difficulty": difficulty, "confidence": confidence, "stakes": stakes}
+
+    # An unsure answer is not evidence of a hard turn. Its averaged score lands mid-rubric by arithmetic,
+    # so it must never buy the expensive tier: a harmless unsure turn stays put, a risky one gets medium.
+    unsure = confidence < config["min_confidence"]
+    if unsure and not (risky or stakes > 0.6):
+        return {**judged, "tier": None, "specialty": "general", "reason": f"low confidence {confidence:.2f}"}
+
+    if unsure:
+        tier = "medium"
+    elif p_hard >= config["hard_needs_probability"]:
+        tier = "hard"
+    elif p_simple >= config["simple_needs_probability"] and confidence >= config["simple_needs_confidence"]:
+        tier = "simple"
+    else:
+        tier = "medium"
+    if tier == "simple" and (risky or stakes > 0.4 or features_only):
+        tier = "medium"        # risk words and costly mistakes set a floor of medium; they do not buy hard
+    if not unsure and stakes > 0.85 and p_hard >= 0.35:
+        tier = "hard"          # a costly mistake tips a turn that is already leaning hard
+    kind = answers["kind"]
+    specialty = kind["choice"] if kind["confidence"] >= 0.5 else "general"
+    return {**judged, "tier": tier, "specialty": specialty, "reason": f"{tier} {specialty}"}
+
+
 def decide(
     prompt: str, *, current: Optional[str] = None, context_tokens: int = 0, has_images: bool = False,
     profile: Optional[str] = None, pinned: bool = False, config: Optional[Dict[str, Any]] = None,
@@ -532,7 +580,7 @@ def decide(
     limit = int(config.get("ask_chars", 2500))
     inner = unwrap(prompt, config)
     unwrapped = inner is not prompt and inner != prompt
-    ask = inner if len(inner) <= limit else inner[:limit // 4] + "\n[…]\n" + inner[-(limit - limit // 4):]
+    ask = clip_ask(inner, limit)
 
     # A recurring job repeats its instruction verbatim, so buy the decision once and reuse it.
     cache_key = None
@@ -545,7 +593,7 @@ def decide(
     # the opening and the end, so "drop the production database" in the middle of a long
     # paste tripped neither guard: the turn routed to the cheapest tier and its text was
     # sent as ordinary text. What is clipped is what Jev reads, never what we check.
-    risky = bool(_HARD_RISK.search(privacy.normalize(inner)))
+    risky = is_risky(inner)
     private = profile in (config.get("private_profiles") or []) or privacy.is_sensitive(inner)
     mode = "features" if private else config.get("mode", "redacted-text")
     state: Any = state_for(ask, context_tokens=context_tokens, private=(mode == "features"), limit=limit)
@@ -559,34 +607,11 @@ def decide(
         # Answers asked by `turn.decide_turn` in somebody else's request. A caller that hands
         # us a partial object is a bug in that caller, not a reason to route on a guess.
         return _keep(current, "routing answers incomplete", private=private)
-    difficulty, confidence = answers["difficulty"]["score"], answers["difficulty"]["confidence"]
-    stakes = answers["costly_mistake"]["noul"]
-    spread = answers["difficulty"].get("probabilities") or {}
-    if spread:
-        p_simple, p_hard = spread.get(0, 0.0), spread.get(2, 0.0) + spread.get(3, 0.0)
-    else:                      # no spread returned: fall back to the averaged score, conservatively
-        p_simple, p_hard = float(difficulty < 0.5), float(difficulty >= 2.25)
-
-    # An unsure answer is not evidence of a hard turn. Its averaged score lands mid-rubric by arithmetic,
-    # so it must never buy the expensive tier: a harmless unsure turn stays put, a risky one gets medium.
-    unsure = confidence < config["min_confidence"]
-    if unsure and not (risky or stakes > 0.6):
-        return _keep(current, f"low confidence {confidence:.2f}", private=private)
-
-    if unsure:
-        tier = "medium"
-    elif p_hard >= config["hard_needs_probability"]:
-        tier = "hard"
-    elif p_simple >= config["simple_needs_probability"] and confidence >= config["simple_needs_confidence"]:
-        tier = "simple"
-    else:
-        tier = "medium"
-    if tier == "simple" and (risky or stakes > 0.4 or mode == "features"):
-        tier = "medium"        # risk words and costly mistakes set a floor of medium; they do not buy hard
-    if not unsure and stakes > 0.85 and p_hard >= 0.35:
-        tier = "hard"          # a costly mistake tips a turn that is already leaning hard
-    kind = answers["kind"]
-    specialty = kind["choice"] if kind["confidence"] >= 0.5 else "general"
+    judged = judge_answers(answers, config, risky=risky, features_only=(mode == "features"))
+    if judged["tier"] is None:
+        return _keep(current, judged["reason"], private=private)
+    tier, specialty = judged["tier"], judged["specialty"]
+    difficulty, confidence, stakes = judged["difficulty"], judged["confidence"], judged["stakes"]
 
     # With no cache and no network the catalog load raises, and it used to take the turn
     # with it. Routing blind is not the answer either: without rows nothing checks that the

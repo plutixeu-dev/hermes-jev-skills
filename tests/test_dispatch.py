@@ -243,3 +243,107 @@ class PolicyFileTests(unittest.TestCase):
             path.write_text(json.dumps({"mode": "shadow"}))
             with mock.patch.dict(os.environ, {"JEV_DISPATCH_POLICY": str(path)}):
                 self.assertEqual(dispatch.load_policy()["mode"], "shadow")
+
+
+def answers(p_hard=0.0, p_simple=0.0, confidence=0.9, kind="general", stakes=0.1):
+    rest = max(0.0, 1.0 - p_hard - p_simple)
+    return {"difficulty": {"score": 2.0 if p_hard >= 0.6 else 0.1 if p_simple >= 0.7 else 1.0,
+                           "confidence": confidence,
+                           "probabilities": {0: p_simple, 1: rest, 2: p_hard, 3: 0.0}},
+            "kind": {"choice": kind, "confidence": 0.9},
+            "costly_mistake": {"noul": stakes}}
+
+
+class Wire:
+    """A Jev that judges every turn hard coding work, and remembers what it was sent."""
+
+    def __init__(self):
+        self.bodies = []
+
+    def __call__(self, body, headers, timeout):
+        request = json.loads(body)
+        self.bodies.append(request)
+        out = {}
+        for name, question in request["questions"].items():
+            if question["type"] == "score":
+                out[name] = {"type": "score", "score": 2.05, "confidence": 0.9,
+                             "probabilities": {"0": 0.1, "1": 0.1, "2": 0.45, "3": 0.35}}
+            elif question["type"] == "choice":
+                keys = list(question["criteria"])
+                best = "coding" if "coding" in keys else keys[0]
+                share = 0.1 / max(1, len(keys) - 1)
+                out[name] = {"type": "choice", "choice": best, "confidence": 0.9,
+                             "probabilities": {key: (0.9 if key == best else share) for key in keys}}
+            else:
+                out[name] = {"type": "noul", "noul": 0.2}
+        return json.dumps({"model": "jev-test", "answers": out, "usage": {"input_tokens": 1}}).encode()
+
+
+class ClassifyTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-key-not-real"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.policy = dispatch.load_policy(NOWHERE)
+
+    def classify(self, text="Find the race in the scheduler", klass="public", **kwargs):
+        kwargs.setdefault("config", dispatch.route.load_config(NOWHERE))   # never this machine's routing.json
+        return dispatch.classify_with_jev(text, privacy_class=klass, policy=self.policy, **kwargs)
+
+    def test_hard_coding_work_is_frontier_repository_work(self):
+        record = self.classify(answers=answers(p_hard=0.8, kind="coding"))
+        self.assertEqual((record["niveau"], record["exit"], record["signals"]), ("frontier", "ESCALATE", ["G8"]))
+        self.assertTrue(record["repo_werk"])
+        self.assertEqual(dispatch.check_triage(record), [])
+
+    def test_simple_work_is_tiny(self):
+        record = self.classify(answers=answers(p_simple=0.9, confidence=0.95))
+        self.assertEqual((record["niveau"], record["exit"]), ("tiny", "PROCEED"))
+
+    def test_an_unsure_answer_about_a_harmless_turn_stays_small(self):
+        record = self.classify(answers=answers(p_hard=0.8, confidence=0.3))
+        self.assertEqual(record["niveau"], "tiny")
+        self.assertIn("low confidence", record["why"])
+
+    def test_jev_is_never_asked_about_a_highly_sensitive_turn(self):
+        def refuse(*_):
+            raise AssertionError("Jev was asked about a highly sensitive turn")
+        record = self.classify(klass="highly_sensitive", transport=refuse)
+        self.assertEqual((record["niveau"], record["source"]), ("standard", "policy"))
+
+    def test_a_private_turn_sends_features_not_text(self):
+        wire = Wire()
+        record = self.classify(text="SECRETPLAN: rewrite the scheduler", klass="private", transport=wire)
+        self.assertEqual(record["niveau"], "frontier")
+        self.assertNotIn("SECRETPLAN", json.dumps(wire.bodies))
+        self.assertIn("turn_features", json.dumps(wire.bodies))
+
+    def test_a_public_turn_sends_redacted_text(self):
+        wire = Wire()
+        self.classify(text="Rewrite the scheduler for jan@example.org", transport=wire)
+        sent = json.dumps(wire.bodies)
+        self.assertIn("Rewrite the scheduler", sent)
+        self.assertNotIn("jan@example.org", sent)
+
+    def test_jev_down_means_standard_which_stays_here(self):
+        def down(*_):
+            raise dispatch.client.JevError("auth_failed")
+        record = self.classify(transport=down)
+        self.assertEqual((record["niveau"], record["source"]), ("standard", "fail_open"))
+
+    def test_incomplete_answers_are_not_a_judgement(self):
+        record = self.classify(answers={"difficulty": {"score": 1.0}})
+        self.assertEqual((record["niveau"], record["source"]), ("standard", "fail_open"))
+
+
+class JudgeAnswersTests(unittest.TestCase):
+    def test_features_only_never_buys_the_cheapest_tier(self):
+        config = dispatch.route.load_config(NOWHERE)
+        judged = dispatch.route.judge_answers(answers(p_simple=0.9, confidence=0.95), config,
+                                              risky=False, features_only=True)
+        self.assertEqual(judged["tier"], "medium")
+
+    def test_hard_needs_real_probability_mass(self):
+        config = dispatch.route.load_config(NOWHERE)
+        self.assertEqual(dispatch.route.judge_answers(answers(p_hard=0.8), config, risky=False,
+                                                      features_only=False)["tier"], "hard")
