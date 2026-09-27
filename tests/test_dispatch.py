@@ -730,3 +730,32 @@ class IsolationOfCooldownsTests(unittest.TestCase):
         report = dispatch.check_agents(policy(), which=lambda p: None, cooling=NOT_COOLING, has_key=lambda: False)
         self.assertIn("policy_mode", report)
         self.assertNotIn("mode", report)
+
+
+class LayeringTests(unittest.TestCase):
+    def layers(self, shared, own):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for index, layer in enumerate((shared, own)):
+                path = Path(tmp) / f"{index}.json"
+                path.write_text(json.dumps(layer))
+                paths.append(path)
+            with mock.patch.object(dispatch, "policy_paths", return_value=paths):
+                return dispatch.load_policy()
+
+    def test_a_broken_no_in_the_profile_file_is_still_a_no(self):
+        for broken in ("false", 0, None, []):
+            loaded = self.layers({"agents": {"openai": {"enabled": True}}}, {"agents": {"openai": {"enabled": broken}}})
+            self.assertIs(loaded["agents"]["openai"]["enabled"], False, broken)
+
+    def test_a_broken_privacy_list_allows_nothing(self):
+        for broken in (None, ["public", None], "private,public"):
+            loaded = self.layers({}, {"agents": {"openai": {"privacy": broken}}})
+            expected = ["private,public"] if isinstance(broken, str) else []
+            self.assertEqual(loaded["agents"]["openai"]["privacy"], expected, broken)
+
+    def test_broken_privacy_settings_reset_to_the_strictest(self):
+        loaded = self.layers({"profiles": {"default": "public"}, "jev_text_for": ["public", "private"]},
+                             {"profiles": 5, "default_privacy": 7, "jev_text_for": {"x": 1}})
+        self.assertEqual((loaded["profiles"], loaded["default_privacy"], loaded["jev_text_for"]),
+                         ({}, "highly_sensitive", []))

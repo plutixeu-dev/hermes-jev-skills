@@ -232,6 +232,11 @@ def _orders(value: Any) -> Dict[str, List[str]]:
     return out
 
 
+# What a broken value becomes, where keeping the previous file's value could loosen privacy.
+_BROKEN_AGENT = {"enabled": False, "privacy": []}
+_BROKEN_TOP = {"profiles": {}, "default_privacy": "highly_sensitive", "jev_text_for": []}
+
+
 def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
     """The defaults with each file laid over them. A missing or broken file is skipped, never fatal."""
     policy = copy.deepcopy(DEFAULT_POLICY)
@@ -258,11 +263,17 @@ def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
                         value = _coerce(_AGENT_SHAPE[key], value)
                     if key not in _AGENT_SHAPE or _fits(_AGENT_SHAPE[key], value):
                         merged[key] = value
+                    elif key in _BROKEN_AGENT:
+                        merged[key] = copy.deepcopy(_BROKEN_AGENT[key])   # a broken yes is a no
                 policy["agents"][name] = merged
         for key, value in layer.items():
             if key in DEFAULT_POLICY:
                 value = _coerce(DEFAULT_POLICY[key], value)
-            if key == "agents" or (key in DEFAULT_POLICY and not _fits(DEFAULT_POLICY[key], value)):
+            if key == "agents":
+                continue
+            if key in DEFAULT_POLICY and not _fits(DEFAULT_POLICY[key], value):
+                if key in _BROKEN_TOP:
+                    policy[key] = copy.deepcopy(_BROKEN_TOP[key])
                 continue
             # One level deep, so a file that changes one order or one profile keeps the others.
             if isinstance(value, dict) and isinstance(policy.get(key), dict):
