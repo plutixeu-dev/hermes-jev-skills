@@ -18,6 +18,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import privacy
+
 TYPES = ("EXPLAIN", "CREATE", "CHANGE", "FIX", "DECIDE", "RESEARCH", "REVIEW", "TALK")
 EXITS = ("PROCEED", "ASSUME", "ASK", "ESCALATE")
 SIGNALS = tuple(f"G{n}" for n in range(1, 10))
@@ -76,3 +78,38 @@ def parse_triage(text: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
         return None, [f"TRIAGE is not valid JSON ({error.msg})"]
     errors = check_triage(record)
     return (None, errors) if errors else (record, [])
+
+
+# Words that put someone else's health, money, record or file into the turn. They make a turn
+# highly sensitive: only this machine may answer it. Deliberately not "client" or "token": in
+# a coding chat those are ordinary words, and a gate that fires on every other coding turn
+# gets switched off. dispatch.json can add terms (`sensitive_terms`); it never removes these.
+DEFAULT_SENSITIVE_TERMS = (
+    "cliënt", "cliënten", "patiënt", "patiënten", "dossier", "bsn", "burgerservicenummer", "iban",
+    "diagnose", "medicatie", "strafblad", "schulden", "gespreksverslag",
+)
+_IBAN = re.compile(r"\bNL\d{2}\s?[A-Z]{4}(?:\s?\d){10}\b")
+
+
+def privacy_class(text: str, *, profile: Optional[str], policy: Dict[str, Any]) -> Tuple[str, str]:
+    """(class, why) for one turn: the stricter of what the profile is and what the text shows.
+
+    A profile nobody classified gets `default_privacy`, highly sensitive unless the policy says
+    otherwise: an unknown lane stays on this machine.
+    """
+    profiles = policy.get("profiles") or {}
+    base = profiles.get(profile or "default") or policy.get("default_privacy") or "highly_sensitive"
+    if base not in PRIVACY:
+        base = "highly_sensitive"
+    probe = privacy.normalize(text or "")
+    if privacy.is_sensitive(probe):
+        return "highly_sensitive", "looks like it holds a secret"
+    lowered = probe.lower()
+    for term in DEFAULT_SENSITIVE_TERMS + tuple(policy.get("sensitive_terms") or ()):
+        if re.search(r"(?<!\w)" + re.escape(str(term).lower()) + r"(?!\w)", lowered):
+            return "highly_sensitive", f"mentions {term}"
+    if _IBAN.search(probe):
+        return "highly_sensitive", "holds an IBAN"
+    if base == "public" and privacy.has_contact_details(probe):
+        return "private", "holds contact details"
+    return base, f"profile {profile or 'default'}"

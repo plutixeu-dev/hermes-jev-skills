@@ -93,6 +93,12 @@ def is_sensitive(text: str) -> bool:
                 or _SECRET_ASSIGNMENT.search(probe) or _TOKEN_SHAPES.search(probe))
 
 
+def has_contact_details(text: str) -> bool:
+    """An email address or a phone number: data about a person, even when it is your own."""
+    probe = normalize(text)
+    return bool(_EMAIL.search(probe) or _PHONE.search(probe) or _INTL_PHONE.search(probe))
+
+
 def redact(text: str, limit: int = 4000) -> str:
     out = normalize(text)
     # Hold tracking numbers aside so the phone rule cannot reach their digits, then put

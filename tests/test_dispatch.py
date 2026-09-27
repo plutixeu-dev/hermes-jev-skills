@@ -65,3 +65,39 @@ class TriageTests(unittest.TestCase):
     def test_a_boolean_is_not_a_token_count(self):
         _, errors = dispatch.parse_triage(line(context_tokens=True))
         self.assertTrue(any("context_tokens" in e for e in errors))
+
+
+POLICY = {"profiles": {"default": "private", "coding": "public"}, "default_privacy": "highly_sensitive"}
+
+
+class PrivacyClassTests(unittest.TestCase):
+    def klass(self, text, profile="coding", policy=POLICY):
+        return dispatch.privacy_class(text, profile=profile, policy=policy)[0]
+
+    def test_a_profile_nobody_classified_stays_on_this_machine(self):
+        self.assertEqual(self.klass("hoi", profile="onbekend"), "highly_sensitive")
+
+    def test_the_profile_class_applies_to_an_ordinary_turn(self):
+        self.assertEqual(self.klass("Leg uit wat een bind mount is."), "public")
+        self.assertEqual(self.klass("Leg uit wat een bind mount is.", profile="default"), "private")
+
+    def test_a_secret_makes_any_turn_highly_sensitive(self):
+        self.assertEqual(self.klass("mijn OPENAI_API_KEY=nietecht123"), "highly_sensitive")
+
+    def test_words_about_someone_elses_file_make_it_highly_sensitive(self):
+        self.assertEqual(self.klass("Vat het gespreksverslag van mijn cliënt samen", profile="default"),
+                         "highly_sensitive")
+
+    def test_client_in_code_is_not_a_person(self):
+        self.assertEqual(self.klass("Why does my HTTP client time out?"), "public")
+
+    def test_contact_details_lift_a_public_turn_to_private(self):
+        self.assertEqual(self.klass("Mail jan@example.org de planning"), "private")
+
+    def test_an_iban_is_highly_sensitive(self):
+        self.assertEqual(self.klass("Maak over naar NL91 ABNA 0417 1643 00"), "highly_sensitive")
+
+    def test_the_policy_adds_terms_and_keeps_the_defaults(self):
+        policy = {**POLICY, "sensitive_terms": ["salaris"]}
+        self.assertEqual(self.klass("Wat is mijn salaris?", policy=policy), "highly_sensitive")
+        self.assertEqual(self.klass("Wat staat er in het dossier?", policy=policy), "highly_sensitive")
