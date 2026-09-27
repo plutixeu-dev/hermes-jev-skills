@@ -226,7 +226,7 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
     if not prompt.strip():
         _out({"error": "invalid_request", "detail": "no prompt and no user message"})
         return 2
-    if messages is None:
+    if not messages:                                                    # none, or `[]`: the prompt is the turn
         messages = [{"role": "user", "content": prompt}]
     elif not isinstance(messages[-1], dict) or messages[-1].get("role") != "user":
         messages = [*messages, {"role": "user", "content": prompt}]     # the prompt is the new turn
@@ -764,7 +764,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", nargs="?", choices=["route", "check"], default="route")
     p.add_argument("--prompt")
     p.add_argument("--profile")
-    p.add_argument("--privacy", choices=list(dispatch.PRIVACY), help="treat the profile as this class for this call")
+    p.add_argument("--privacy", choices=list(dispatch.PRIVACY),
+                   help="make the profile at least this strict for this call; it never loosens one")
     p.add_argument("--background", action="store_true", help="not an interactive chat turn")
     p.add_argument("--run", action="store_true", help="actually hand the turn to the chosen agent")
     p.set_defaults(func=cmd_dispatch)

@@ -4,7 +4,7 @@
 
 **Receptionist dispatch: a hard turn goes to the agent that should answer it**
 
-- New `hermes-dispatch` plugin (off by default) and `jev dispatch`. On the first provider call of a turn, `llm_execution` middleware classifies the turn with Jev, applies a deterministic policy (privacy class, level, context window, cooldowns, order), and either lets the local call go ahead or hands the turn to Codex on a ChatGPT login, Claude Code, or OpenRouter. The answer comes back unchanged under one line naming its author. Shadow mode decides and logs only. A quota, auth or missing-program failure cools that agent for every lane through the ladder, under its own `dispatch:<agent>` name. A timeout cools it for five minutes. Then the next agent or the local model answers. A turn spends at most `turn_budget` (10 minutes) on agents. The privacy class covers every turn a handoff would carry, not only the newest. Agents run in an empty directory with a minimal environment, and claude runs without file, shell or web tools. A failure's detail never carries output text.
+- New `hermes-dispatch` plugin (off by default) and `jev dispatch`. On the first provider call of a turn, `llm_execution` middleware classifies the turn with Jev, applies a deterministic policy (privacy class, level, context window, cooldowns, order), and either lets the local call go ahead or hands the turn to Codex on a ChatGPT login, Claude Code, or OpenRouter. The answer comes back unchanged under one line naming its author. Shadow mode decides and logs only. A quota, auth or missing-program failure cools that agent for every lane through the ladder, under its own `dispatch:<agent>` name. A timeout cools it for five minutes. Then the next agent or the local model answers. A turn spends at most `turn_budget` (10 minutes) on agents. The privacy class covers every turn a handoff would carry, not only the newest. The handoff's history is the conversation as it was said: recalled memory, other plugins' context and compaction summaries stay behind. Agents run in an empty directory with a minimal environment: API keys stay behind, a Claude login token and proxy settings pass. claude runs with no tools and no MCP servers, in one empty directory of its own so its session resumes. A failure's detail never carries output text, and the log never names a word from `sensitive_terms`.
 - `route.judge_answers`, `route.clip_ask` and `route.is_risky` are extracted from `route.decide` with no change in behaviour, so routing and dispatch share one calibrated judgement.
 - Privacy for dispatch:
   - `privacy.has_secret_value` asks whether a credential value is present, not a word about one.
@@ -12,13 +12,16 @@
   - Dutch mobile numbers in every usual spelling are now masked by `redact` as well.
   - `privacy.has_contact_details` reads addresses and phone numbers as people write them, not timestamps or git URLs.
   - Sensitive terms count in any form.
-  - `dispatch.json` values of the wrong type are ignored; `"enabled": "false"` is not a yes.
+  - A broken value or file in a later layer of `dispatch.json` turns agents off and privacy to the strictest, never looser. `"enabled": "false"` is not a yes, a broken privacy list allows nothing, and an agent entry that is not an object turns that agent off. A file that is there but cannot be read (not UTF-8, not JSON, not an object) turns every agent off, privacy to the strictest and the mode off, and `jev dispatch check` and `/dispatch` name it.
   - One string where a list is expected is a list of one; an `argv` string is split like a command line.
   - A turn with words about secrets sends Jev coarse features only, as routing does. So do routing's `mode: "features"` and `private_profiles`.
   - OpenRouter takes public turns only, by kind, whatever it is named.
-  - A broken setting in a later file makes things stricter: a broken `enabled` is a no, and a broken privacy list allows nothing.
 - The TRIAGE record follows the reasoning library's routing contract, so a local receptionist can later take Jev's place as the classifier (one classifier per turn).
 - `tests/test_turn.py` and `tests/test_question_shape.py` no longer depend on a real key being installed.
+
+**Every profile of a multiplexed gateway is itself**
+
+- A gateway that serves several profiles from one process binds each turn's profile with a context-local override and leaves `HERMES_HOME` at the root. `hermes-jev` and `jevkit.catalog.hermes_home()` read only the variable, so every profile there counted as `default`: routing's `private_profiles` and a profile's own `routing.json` never applied. They now read Hermes's override first, as `hermes-handoff` already did, and so does `hermes-dispatch`.
 
 **Context-filter selection regret evaluation and effective middleware routing telemetry**
 

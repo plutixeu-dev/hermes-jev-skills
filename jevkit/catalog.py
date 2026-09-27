@@ -25,6 +25,16 @@ HERMES_ALIASES = {
 
 
 def hermes_home() -> Path:
+    """The profile this turn runs in. A gateway that serves several profiles from one process
+    binds each turn's profile with a context-local override and leaves HERMES_HOME at the root,
+    so reading only the variable would make every profile the default one."""
+    try:
+        from hermes_constants import get_hermes_home_override  # type: ignore
+        override = get_hermes_home_override()
+        if override:
+            return Path(override)
+    except Exception:  # noqa: BLE001 - outside Hermes, or an older one
+        pass
     return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
 
 

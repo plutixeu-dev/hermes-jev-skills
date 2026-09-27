@@ -34,7 +34,7 @@ Anything unsure, failed or blocked is answered locally. Dispatch never loses a t
 | Agent | What runs | Login |
 |---|---|---|
 | `openai` | `codex exec`, in Codex's read-only sandbox | the ChatGPT login Codex already holds |
-| `claude` | `claude -p`, in plan mode, without tools | the Claude login Claude Code already holds |
+| `claude` | `claude -p`, in plan mode, without tools or MCP servers | the Claude login Claude Code already holds |
 | `openrouter` | one chat completion | the key stored with `jev setup-key --provider openrouter` |
 
 The OpenRouter key goes in the way the Jev key does: the person pastes it into the page that
@@ -71,6 +71,11 @@ so the last one wins:
 
 `JEV_DISPATCH_POLICY` names one file and replaces all three.
 
+A gateway that serves several profiles from one process (`multiplex_profiles`) binds each
+turn's profile without changing `HERMES_HOME`. Dispatch follows the turn's profile, so each
+profile of a multiplexed gateway reads its own `dispatch.json` and its own `/dispatch` switch,
+has its own class, and logs under its own home.
+
 Other settings, all optional:
 
 | Setting | Default | What it does |
@@ -91,9 +96,19 @@ Each agent also takes `privacy` (the classes it may take), `timeout`, `cooldown`
 on for claude by default). Claude also takes `max_turns`. If a flag differs in your installed
 CLI, put the working argument list under `agents.<name>.argv`. No code change is needed.
 
-A value of the wrong type is ignored. `"enabled": "false"` is a string, so it is not a yes. A
-broken setting in a later file makes things stricter, never looser: a broken `enabled` is a no,
-and a broken privacy list allows nothing.
+A broken value or file in a later layer turns agents off and privacy to the strictest, never
+looser than what came before:
+
+- `"enabled": "false"` is a string, so it is not a yes. A broken `enabled` is a no, and a
+  broken privacy list allows nothing.
+- An agent entry that is not an object (`"openai": false`, `null`, `"off"`) turns that agent
+  off. An `agents` that is not an object turns every agent off.
+- A broken `profiles`, `default_privacy` or `jev_text_for` becomes the strictest value, and a
+  broken `mode` is `off`.
+- A file that is there but cannot be read (not UTF-8, not JSON, not an object) does all of
+  that at once: every agent off, privacy at its strictest, mode `off`. `jev dispatch check`
+  lists it under `broken_files`, and `/dispatch` names it. A file that is not there is simply
+  skipped.
 
 ## Privacy classes
 
@@ -116,10 +131,13 @@ shows. The check reads the message and every recent turn a handoff would carry, 
 newest message.
 
 - A secret value makes a turn highly sensitive.
-- So does a sensitive word, or an IBAN from any country. The built-in words are the Dutch
-  words for a client, a patient or a file, in any form, and the words for a conversation
-  report, a treatment plan, an anamnesis, medication, a criminal record, debts, a BSN and an
-  IBAN. `sensitive_terms` adds your own words. It never removes the built-in ones.
+- So does a sensitive word, or an IBAN from any country. The built-in words are Dutch, and
+  only these count: `cliënt`, `patiënt`, `clienten`, `patienten`, `dossier`,
+  `gespreksverslag`, `behandelplan`, `anamnese`, `medicatie`, `strafblad`, `schulden`,
+  `burgerservicenummer`, `bsn` and `iban`. The longer ones count in any form, plurals and
+  compounds too (`zorgdossier`); `bsn` and `iban` count as whole words. English words do not
+  count: "client file" or "treatment plan" on its own keeps no turn here. `sensitive_terms` adds
+  your own words, in any language. It never removes the built-in ones.
 - Contact details make a public turn private.
 
 **A secret.** A secret is a value (a key, a token, a password), not a word about one. A
@@ -138,7 +156,8 @@ message.
 
 So while routing is on or in shadow, dispatch stands aside. It logs `stood aside`, and the
 local call goes ahead. It reads routing the way hermes-jev does: a `/jev routing` switch first,
-then `routing` in config.yaml.
+then `routing` in config.yaml. That counts only while hermes-jev is loaded: when Hermes says
+the plugin is gone, a switch left behind no longer silences dispatch.
 
 Turn routing off before you turn dispatch on.
 
@@ -208,24 +227,47 @@ and shows who would answer, and it hands nothing to an agent. `--run` hands the 
   tokens, goes as coarse features. So does a turn that routing's own settings keep to
   features. A highly sensitive turn sends nothing.
 - **To the chosen agent's provider**, one handoff. It holds the person's message and up to six
-  recent user and assistant turns, text only, redacted, about 12,000 characters. It has the
-  reasoning library's shape: To, Reason, Request, Constraints, Evidence, Tried, Need back. The
-  Constraints line asks for a written answer only: read no files, run no commands, change
-  nothing. More than 20 turns never leave, whatever the setting.
-- System prompts, tool output, memory and files are never part of a handoff. A handoff that
-  would carry a secret value is not sent at all.
+  recent user and assistant turns as they were said, text only, redacted, about 12,000
+  characters. It has the reasoning library's shape: To, Reason, Request, Constraints, Evidence,
+  Tried, Need back. The Constraints line asks for a written answer only: read no files, run no
+  commands, change nothing. More than 20 turns never leave, whatever the setting.
+- System prompts, tool output, memory and files are never part of a handoff. The history is
+  the conversation as it was said, not the copy Hermes sends its own model: the recalled
+  `<memory-context>`, every plugin's context and compaction summaries stay behind. One
+  exception: a turn that carried an image keeps the context Hermes added inside the turn
+  itself. Dispatch cuts it from the recalled memory on, but plugin context added without
+  recalled memory carries no mark, so it goes along, redacted. A handoff that would carry a
+  secret value is not sent at all.
 - **The log** holds decisions only: who, why, the privacy class, and how each attempt went.
-  Never prompt text, never an answer. A failure's detail never carries an agent's output.
+  Never prompt text, never an answer. A failure's detail never carries an agent's output. A
+  word you added to `sensitive_terms` is never named: the reason says only that one of them
+  matched.
 
 The answer comes back as it is, under one line: `[openai · <model>]`, a blank line, then the
 answer.
 
 ## Isolation
 
-Agents run in a fresh empty directory with a minimal environment. API keys are not passed on,
-so each CLI uses its own login. Claude runs with its file, shell and web tools disabled. Codex
-runs in its read-only sandbox, and the handoff asks it to read no files. It can still run
-read-only commands if it decides to, so the working directory is empty on purpose.
+Agents run in an empty directory with a minimal environment. API keys are not passed on, so
+each CLI uses its own login. The Claude login token from `claude setup-token`
+(`CLAUDE_CODE_OAUTH_TOKEN`) does pass, because it is the subscription login itself, and so do
+the proxy settings.
+
+Codex gets a fresh empty directory for every turn. Claude gets one of its own under the temp
+directory (`jev-claude-<uid>/work`), so the next turn resumes its session there. That
+directory is used only while it is a real directory, yours, closed to other users' writes, and
+empty. Otherwise claude runs in a fresh one and starts a new session: isolation beats
+continuity. It stays under the temp directory, never under your home, because Claude Code
+reads every `CLAUDE.md` from its working directory up to `/`.
+
+Claude runs with no tools at all (`--tools ""`) and no MCP servers (`--strict-mcp-config`).
+`--disallowedTools` stays as the fallback for a CLI without `--tools`.
+
+Codex runs in its read-only sandbox, and the handoff asks it to read no files. Read-only is
+not no access. Codex can still read any file the Hermes user can read, `~/.hermes` included,
+and a turn that asks it to can send such a file to OpenAI. The empty working directory does
+not fence that in. The remedies are to keep Codex off, or to run Hermes as a user that cannot
+read what must stay here.
 
 ## Cooldowns
 
@@ -234,7 +276,9 @@ default, 10 for OpenRouter. A timeout cools it for `timeout_cooldown`, five minu
 next agent or the local model answers.
 
 Cooldowns live in the shared ladder file under `dispatch:<agent>`, separate from routing's
-rungs. Every lane sees them. `jev ladder clear --rung dispatch:openai` reopens a seat early.
+rungs. Every lane sees them. `jev ladder status` does not list dispatch cooldowns: it shows
+routing's rungs only. `jev dispatch check` and `/dispatch` do, and
+`jev ladder clear --rung dispatch:openai` clears one, which reopens that seat early.
 
 ## Time
 
@@ -263,3 +307,5 @@ needs an API key.
 - **Text only.** A turn that carries an image stays on this machine.
 - **Read-only agents.** They answer in writing, and change no files and no systems.
 - **Synchronous.** The chat waits while the agent works, up to `turn_budget`.
+- **Stop does not stop it.** Stop does not interrupt a handed-off turn. The agent runs until it
+  answers or `turn_budget` ends.

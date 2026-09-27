@@ -15,9 +15,11 @@ that dispatch.json can replace, so a changed CLI flag is a config edit, not a co
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -34,20 +36,26 @@ _AUTH = re.compile(r"(?i)(not logged in|please log ?in|log ?in required|unauthor
 
 CODEX_ARGV = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--cd", "{workdir}",
               "--model", "{model}", "--output-last-message", "{output}", "-"]
+# `--strict-mcp-config` with no `--mcp-config` loads no MCP server; `--tools ""` turns every built-in
+# tool off. `--disallowedTools` stays as the fallback for a CLI that does not know `--tools`.
 CLAUDE_ARGV = ["claude", "-p", "--output-format", "json", "--model", "{model}", "--max-turns", "{max_turns}",
-               "--permission-mode", "plan", "--disallowedTools", "{disallowed}", "--resume", "{session}"]
+               "--permission-mode", "plan", "--strict-mcp-config", "--tools", "",
+               "--disallowedTools", "{disallowed}", "--resume", "{session}"]
 # An answering agent needs none of these: no files, no shell, no web. It gets the handoff and answers.
 CLAUDE_DISALLOWED = "Bash,Read,Grep,Glob,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task"
 
 # The environment a CLI gets: what it needs to run and find its own login, nothing else. An API
 # key in Hermes's environment would override the subscription login, and no agent needs Jev's.
+# CLAUDE_CODE_OAUTH_TOKEN is the subscription login itself (`claude setup-token`), not an API key.
 _ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ", "TMPDIR", "SHELL",
              "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
-             "CODEX_HOME", "CLAUDE_CONFIG_DIR", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy",
-             "http_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
-# A value that becomes its own argv item must never start like a flag.
+             "CODEX_HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+             "ALL_PROXY", "https_proxy", "http_proxy", "no_proxy", "all_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR",
+             "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
+# A value that becomes its own argv item must never start like a flag. Brackets are Claude's
+# context-window suffix, as in `opus[1m]`.
 _SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-_MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}")
+_MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+\[\]-]{0,127}")
 
 
 def agent_env() -> dict:
@@ -168,16 +176,52 @@ def run_codex(prompt: str, *, model: str = "", timeout: float = 600.0, argv: Opt
     return Result(text=text, model=model)
 
 
+def _claude_workdir() -> Optional[str]:
+    """The one empty directory claude runs in, or None when it cannot be trusted.
+
+    One directory, so `--resume` finds a session where it was made: a fresh directory per call made
+    resuming depend on a scan across projects that older CLIs lack, and left one
+    `~/.claude/projects/` folder per turn. Under the temp directory, never under `~`: Claude Code
+    reads every CLAUDE.md from its working directory up to `/`. Used only while it is a real
+    directory (not a symlink), this user's own, closed to others' writes, and empty.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        return None
+    uid = getuid()
+    work = Path(tempfile.gettempdir()) / f"jev-claude-{uid}" / "work"
+    try:
+        for path in (work.parent, work):
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(path, 0o700)
+            info = os.lstat(path)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != uid or info.st_mode & 0o022:
+                return None
+        if os.listdir(work):
+            return None
+    except OSError:
+        return None
+    return str(work)
+
+
 def run_claude(prompt: str, *, model: str = "", session: str = "", max_turns: int = 8, timeout: float = 600.0,
                argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) -> Result:
     """One `claude -p` run on the Claude Code login. Plan mode: it answers and edits nothing.
 
-    Never `--bare`: that mode ignores the subscription login and needs an API key.
+    It runs in one empty directory of its own, so the next turn resumes its session there. When
+    that directory cannot be trusted it runs in a fresh one and starts no session it could not
+    resume: isolation beats continuity. Never `--bare`: that mode ignores the subscription login
+    and needs an API key.
     """
+    model = _check_model(model)
     session = session if session and _SESSION_ID.fullmatch(session) else ""
-    with tempfile.TemporaryDirectory(prefix="jev-claude-") as workdir:
-        done = _call(fill(argv or CLAUDE_ARGV, model=_check_model(model), session=session, max_turns=max_turns,
-                          disallowed=CLAUDE_DISALLOWED), prompt, timeout, runner, workdir)
+    workdir = _claude_workdir() if runner is None else None       # a runner of its own takes no directory
+    fresh = runner is None and workdir is None
+    if fresh:
+        session = ""
+    with (tempfile.TemporaryDirectory(prefix="jev-claude-") if fresh else contextlib.nullcontext(workdir)) as cwd:
+        done = _call(fill(argv or CLAUDE_ARGV, model=model, session=session, max_turns=max_turns,
+                          disallowed=CLAUDE_DISALLOWED), prompt, timeout, runner, cwd)
     try:
         data = json.loads(done.stdout or "")
     except (ValueError, RecursionError):
@@ -188,7 +232,7 @@ def run_claude(prompt: str, *, model: str = "", session: str = "", max_turns: in
     text = str(data.get("result") or "").strip()
     if not text:
         raise AgentError("failed", "claude finished without an answer")
-    returned = str(data.get("session_id") or "")
+    returned = "" if fresh else str(data.get("session_id") or "")
     return Result(text=text, model=model, session=returned if _SESSION_ID.fullmatch(returned) else "")
 
 

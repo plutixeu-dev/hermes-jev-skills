@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -475,8 +476,22 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_a_single_term_given_as_a_string_is_one_term(self):
         policy = {**POLICY, "sensitive_terms": "salaris"}
-        self.assertEqual(self.klass("Wat is mijn salaris?", policy=policy), ("highly_sensitive", "mentions salaris"))
+        self.assertEqual(self.klass("Wat is mijn salaris?", policy=policy),
+                         ("highly_sensitive", "mentions a term from sensitive_terms"))
         self.assertEqual(self.klass("Leg uit wat een bind mount is.", policy=policy)[0], "public")
+
+    def test_a_built_in_term_is_named_and_a_persons_own_term_never_is(self):
+        """The reason goes into the decision log. A word the person added is their own secret."""
+        policy = {**POLICY, "sensitive_terms": ["salaris", "Project Merel"]}
+        self.assertEqual(self.klass("Wat staat er in het dossier?", policy=policy), ("highly_sensitive", "mentions dossier"))
+        for text in ("Wat is mijn salaris?", "Hoe staat project merel ervoor?"):
+            self.assertEqual(self.klass(text, policy=policy), ("highly_sensitive", "mentions a term from sensitive_terms"))
+        out = dispatch.dispatch_turn("Wat is mijn salaris?", [{"role": "user", "content": "Wat is mijn salaris?"}],
+                                     profile="coding", policy={**dispatch.load_policy(NOWHERE), **policy},
+                                     config=dispatch.route.load_config(NOWHERE), cooling=NOT_COOLING,
+                                     refuse=lambda *a, **k: None)
+        self.assertEqual(out["agent"], "local")
+        self.assertNotIn("salaris", json.dumps(out))
 
     def test_profiles_that_are_not_a_mapping_count_as_unclassified(self):
         self.assertEqual(self.klass("hoi", policy={**POLICY, "profiles": ["coding"]})[0], "highly_sensitive")
@@ -715,6 +730,27 @@ class CliTests(unittest.TestCase):
         code, out = self.run_stdin([1, 2])
         self.assertEqual((code, out["error"]), (2, "invalid_request"))
 
+    def test_an_empty_history_makes_the_prompt_the_only_turn(self):
+        seen = []
+
+        def capture(text, messages, **kwargs):
+            seen.append(messages)
+            return {"agent": "local"}
+
+        with mock.patch.object(cli.dispatch, "dispatch_turn", side_effect=capture):
+            code, out = self.run_stdin({"prompt": "Leg uit wat een bind mount is", "messages": []})
+        self.assertEqual((code, out["agent"]), (0, "local"))
+        self.assertEqual(seen, [[{"role": "user", "content": "Leg uit wat een bind mount is"}]])
+        code, out = self.run_stdin({"messages": []})
+        self.assertEqual((code, out["error"]), (2, "invalid_request"))
+
+    def test_the_privacy_flag_says_it_only_ever_tightens(self):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer), self.assertRaises(SystemExit):
+            cli.main(["dispatch", "--help"])
+        self.assertIn("make the profile at least this strict for this call; it never loosens one",
+                      " ".join(buffer.getvalue().split()))
+
     def test_a_history_ending_in_a_reply_gets_the_prompt_as_its_new_turn(self):
         pol = dispatch.load_policy(NOWHERE)
         pol["profiles"] = {"default": "private"}
@@ -826,3 +862,130 @@ class LayeringTests(unittest.TestCase):
                              {"profiles": 5, "default_privacy": 7, "jev_text_for": {"x": 1}})
         self.assertEqual((loaded["profiles"], loaded["default_privacy"], loaded["jev_text_for"]),
                          ({}, "highly_sensitive", []))
+
+
+class ProfileHomeTests(unittest.TestCase):
+    """A gateway that serves several profiles binds each turn's profile with a context-local
+    override (hermes_constants) and leaves HERMES_HOME at the root."""
+
+    def test_the_policy_files_are_those_of_the_profile_the_gateway_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "profiles" / "secondbrain"
+            fake = types.ModuleType("hermes_constants")
+            fake.get_hermes_home_override = lambda: str(home)
+            with mock.patch.dict(os.environ, {"HERMES_HOME": tmp, "XDG_CONFIG_HOME": str(root / "config")}), \
+                    mock.patch.dict(sys.modules, {"hermes_constants": fake}):
+                os.environ.pop("JEV_DISPATCH_POLICY", None)
+                self.assertEqual((dispatch.catalog_mod.hermes_home(), dispatch.catalog_mod.hermes_root()), (home, root))
+                paths = dispatch.policy_paths()
+        self.assertEqual(paths[-2:], [root / "jev" / "dispatch.json", home / "jev" / "dispatch.json"])
+
+
+class BrokenSettingsTests(unittest.TestCase):
+    """A broken entry or file in a later layer turns agents off and privacy to the strictest."""
+
+    SHARED = {"mode": "on", "profiles": {"default": "public"}, "default_privacy": "public",
+              "jev_text_for": ["public", "private"],
+              "agents": {"openai": {"enabled": True}, "claude": {"enabled": True},
+                         "openrouter": {"enabled": True, "model": "x/y"}}}
+
+    def load(self, own):
+        """The shared layer above, then `own`: an object is written as JSON, bytes as they are."""
+        with tempfile.TemporaryDirectory() as tmp:
+            shared, mine = Path(tmp) / "shared.json", Path(tmp) / "own.json"
+            shared.write_text(json.dumps(self.SHARED))
+            if isinstance(own, bytes):
+                mine.write_bytes(own)
+            elif own == "a directory":
+                mine.mkdir()
+            else:
+                mine.write_text(json.dumps(own))
+            with mock.patch.object(dispatch, "policy_paths", return_value=[shared, mine]):
+                return dispatch.load_policy(), str(mine)
+
+    def assert_off(self, loaded, names=("openai", "claude", "openrouter"), why=None):
+        for name in names:
+            self.assertEqual((loaded["agents"][name]["enabled"], loaded["agents"][name]["privacy"]), (False, []),
+                             f"{name} {why!r}")
+
+    def test_an_agent_entry_that_is_not_an_object_turns_that_agent_off(self):
+        for broken in (False, None, "off", 0, []):
+            loaded, _ = self.load({"agents": {"openai": broken}})
+            self.assert_off(loaded, ["openai"], broken)
+            self.assertEqual(loaded["agents"]["openai"]["kind"], "codex", broken)
+            self.assertIs(loaded["agents"]["claude"]["enabled"], True, broken)
+
+    def test_agents_that_is_not_an_object_turns_every_agent_off(self):
+        for broken in (None, [], "none", False):
+            loaded, _ = self.load({"agents": broken})
+            self.assert_off(loaded, why=broken)
+
+    def test_a_file_that_is_there_but_unreadable_turns_everything_off_and_is_named(self):
+        for raw in ('{"mode": "on", "profiles": {"default": "public"}}'.encode("utf-16"), b'{"mode": "on",',
+                    b"[1, 2]", b'"on"', b"[" * 100000, "a directory"):
+            loaded, path = self.load(raw)
+            self.assertEqual(loaded["broken_files"], [path], raw[:20])
+            self.assertEqual((loaded["mode"], loaded["profiles"], loaded["default_privacy"], loaded["jev_text_for"]),
+                             ("off", {}, "highly_sensitive", []), raw[:20])
+            self.assert_off(loaded, why=raw[:20])
+
+    def test_no_file_is_just_no_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = Path(tmp) / "a-file"
+            blocker.write_text("x")
+            paths = [Path(tmp) / "missing.json", blocker / "dispatch.json"]   # not found; not a directory
+            with mock.patch.object(dispatch, "policy_paths", return_value=paths):
+                loaded = dispatch.load_policy()
+        self.assertEqual((loaded["broken_files"], loaded["mode"]), ([], "off"))
+        self.assertEqual(dispatch.load_policy(NOWHERE)["broken_files"], [])
+
+    def test_a_broken_mode_is_off(self):
+        loaded, _ = self.load({"mode": ["on"]})
+        self.assertEqual(loaded["mode"], "off")
+
+    def test_a_file_cannot_claim_broken_files_of_its_own(self):
+        loaded, _ = self.load({"broken_files": ["elsewhere"]})
+        self.assertEqual(loaded["broken_files"], [])
+
+    def test_check_names_the_broken_files(self):
+        loaded, path = self.load(b"{not json")
+        report = dispatch.check_agents(loaded, which=lambda p: None, cooling=NOT_COOLING, has_key=lambda: False)
+        self.assertEqual(report["broken_files"], [path])
+
+
+class DispatchDocsTests(unittest.TestCase):
+    """What the docs say about dispatch, held to the code that keeps it."""
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def read(self, name):
+        import unicodedata
+        return unicodedata.normalize("NFC", (self.ROOT / name).read_text(encoding="utf-8"))
+
+    def test_the_built_in_terms_are_named_as_they_are(self):
+        import unicodedata
+        for name in ("README.md", "docs/receptionist-dispatch.md"):
+            text = self.read(name)
+            for term in dispatch.DEFAULT_SENSITIVE_TERMS:
+                self.assertTrue(f"`{unicodedata.normalize('NFC', term)}`" in text, f"{name}: {term}")
+            self.assertFalse("a conversation report, a treatment plan" in text, name)   # English words do not match
+
+    def test_the_readme_links_the_dispatch_doc_from_the_table_and_the_bullet(self):
+        readme = self.read("README.md")
+        self.assertTrue("| [receptionist-dispatch.md](docs/receptionist-dispatch.md) |" in readme)
+        bullet = readme.split("- **Dispatch**", 1)[1].split("\n- **Memory**", 1)[0]
+        self.assertIn("(docs/receptionist-dispatch.md)", bullet)
+        self.assertIn("\n  - Jev reads", bullet)            # a fourth sub-bullet, not a paragraph inside the list
+
+    def test_the_dispatch_doc_says_the_limits_plainly(self):
+        doc = " ".join(self.read("docs/receptionist-dispatch.md").split())
+        for said in ("Stop does not interrupt a handed-off turn", "`~/.hermes` included", "keep Codex off",
+                     "`jev ladder status` does not list dispatch cooldowns", "jev ladder clear --rung dispatch:openai",
+                     "its own `dispatch.json` and its own `/dispatch` switch"):
+            self.assertTrue(said in doc, said)
+
+    def test_the_changelog_says_what_a_broken_setting_does(self):
+        unreleased = self.read("CHANGELOG.md").split("\n## ", 2)[1]
+        self.assertFalse("values of the wrong type are ignored" in unreleased)
+        self.assertTrue("turns agents off and privacy to the strictest" in unreleased)

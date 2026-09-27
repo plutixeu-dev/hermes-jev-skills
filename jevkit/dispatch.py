@@ -147,9 +147,12 @@ def privacy_class(text: str, *, profile: Optional[str], policy: Dict[str, Any]) 
     if privacy.has_secret_value(probe):
         return "highly_sensitive", "holds a secret value"
     lowered = probe.lower()
-    for term in DEFAULT_SENSITIVE_TERMS + _extra_terms(policy):
+    for term in DEFAULT_SENSITIVE_TERMS:
         if _mentions(lowered, privacy.normalize(term)):
             return "highly_sensitive", f"mentions {term}"
+    # The reason goes into the decision log. A word the person added is theirs to keep: not named.
+    if any(_mentions(lowered, privacy.normalize(term)) for term in _extra_terms(policy)):
+        return "highly_sensitive", "mentions a term from sensitive_terms"
     if privacy.has_iban(probe):
         return "highly_sensitive", "holds an IBAN"
     if base == "public" and privacy.has_contact_details(probe):
@@ -242,23 +245,44 @@ def _orders(value: Any) -> Dict[str, List[str]]:
 
 # What a broken value becomes, where keeping the previous file's value could loosen privacy.
 _BROKEN_AGENT = {"enabled": False, "privacy": []}
-_BROKEN_TOP = {"profiles": {}, "default_privacy": "highly_sensitive", "jev_text_for": []}
+_BROKEN_TOP = {"profiles": {}, "default_privacy": "highly_sensitive", "jev_text_for": [], "mode": "off"}
+
+
+def _turn_off(policy: Dict[str, Any], names: Sequence[str]) -> None:
+    """These agents off and allowed nothing, their other settings kept."""
+    for name in names:
+        policy["agents"][name] = {**policy["agents"][name], **copy.deepcopy(_BROKEN_AGENT)}
 
 
 def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
-    """The defaults with each file laid over them. A missing or broken file is skipped, never fatal."""
+    """The defaults with each file laid over them. A missing file is skipped, never fatal.
+
+    A file that is there but cannot be read (not UTF-8, not JSON, not an object) turns every agent
+    off and privacy to the strictest, and is named in `broken_files`, so a typo never loosens what
+    an earlier file set. A broken agent entry does that to its agent, a broken `agents` to all.
+    """
     policy = copy.deepcopy(DEFAULT_POLICY)
+    broken: List[str] = []
     for candidate in ([path] if path else policy_paths()):
         try:
             layer = json.loads(Path(candidate).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue                                    # no file
+        except (OSError, ValueError, RecursionError):   # there, but unreadable: rights, bytes, JSON
+            layer = None
         if not isinstance(layer, dict):
+            broken.append(str(candidate))
+            policy.update(copy.deepcopy(_BROKEN_TOP))
+            _turn_off(policy, list(policy["agents"]))
             continue
         agents = layer.get("agents")
-        if isinstance(agents, dict):
+        if "agents" in layer and not isinstance(agents, dict):
+            _turn_off(policy, list(policy["agents"]))           # `"agents": null` is a no for every agent
+        elif isinstance(agents, dict):
             for name, settings in agents.items():
                 if not isinstance(settings, dict):
+                    if name in policy["agents"]:
+                        _turn_off(policy, [name])               # `"openai": false` is a no
                     continue
                 merged = dict(policy["agents"].get(name, {}))
                 for key, value in settings.items():
@@ -289,6 +313,7 @@ def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
             else:
                 policy[key] = value
     policy["frontier_order"] = _orders(policy.get("frontier_order"))
+    policy["broken_files"] = broken             # only ever what this load found, never a file's own say
     return policy
 
 
@@ -409,7 +434,7 @@ def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], 
         judged = route.judge_answers(answers, config, risky=route.is_risky(inner), features_only=features_only)
     except (KeyError, TypeError, ValueError):
         return {**record, "source": "fail_open", "why": "routing answers incomplete"}
-    jev ={key: judged[key] for key in ("tier", "specialty", "confidence", "difficulty", "stakes")}
+    jev = {key: judged[key] for key in ("tier", "specialty", "confidence", "difficulty", "stakes")}
     if judged["tier"] is None:
         return {**record, "niveau": "tiny", "source": "jev", "why": judged["reason"], "jev": jev}
     niveau = (policy.get("tier_to_niveau") or {}).get(judged["tier"], "standard")
@@ -561,4 +586,5 @@ def check_agents(policy: Dict[str, Any], *, which: Optional[Callable[[str], Opti
                       "privacy": settings.get("privacy") or [], "available": available,
                       "cooling_s": round(cooling(_rung(name)))}
     return {"policy_mode": policy.get("mode"), "profiles": policy.get("profiles") or {}, "agents": rows,
-            "policy_files": [str(path) for path in policy_paths()]}
+            "policy_files": [str(path) for path in policy_paths()],
+            "broken_files": list(policy.get("broken_files") or [])}

@@ -92,12 +92,11 @@ The page lives on an unguessable one-time URL, refuses requests with a foreign `
 Jev is a cloud API, so this is spelled out rather than implied:
 
 - **Routing**: the user's turn, redacted (emails, phones, tokens, long hex masked), capped at 2,500 characters (`ask_chars`), read as the opening and, mostly, the end. Never history, tool results, files or memory. Turns that look like they hold a secret, and any profile you list in `private_profiles`, send only coarse features: length, whether code is present, whether risk words appear.
-- **Dispatch** (`hermes-dispatch`, off by default): when a turn Jev judged hard is handed to another agent, that agent's provider receives a handoff: the person's message and up to six recent user and assistant turns, text only, redacted, about 12,000 characters. System prompts, tool output, memory and files are never part of it. It stays on your machine, sent to no one, when:
-  - the profile is highly sensitive (a profile you did not classify counts as one);
-  - the message, or any turn the handoff would carry, uses a Dutch word for a client, a patient or a file. That is `cliënt` or `patiënt` in any form, `clienten` or `patienten` without the trema, and `dossier` in any form. The singular `client` and `patient` do not count, because they are English words too. It also stays when it names a conversation report, a treatment plan, an anamnesis, medication, a criminal record, debts, a BSN or an IBAN. You can add your own words in `dispatch.json`;
+- **Dispatch** (`hermes-dispatch`, off by default): when a turn Jev judged hard is handed to another agent, that agent's provider receives a handoff: the person's message and up to six recent user and assistant turns as they were said, text only, redacted, about 12,000 characters. System prompts, tool output, recalled memory and files are never part of it. It stays on your machine, sent to no one, when:
+  - the profile is highly sensitive (a profile you did not classify counts as one). A gateway that serves several profiles judges each turn by its own profile;
+  - the message, or any turn the handoff would carry, uses one of the built-in words. They are Dutch, and only these count: `cliënt`, `patiënt`, `clienten`, `patienten`, `dossier`, `gespreksverslag`, `behandelplan`, `anamnese`, `medicatie`, `strafblad`, `schulden`, `burgerservicenummer`, `bsn` and `iban`. The longer ones count in any form, plurals and compounds too (`zorgdossier`); `bsn` and `iban` count as whole words. English words do not count, so neither do the singular `client` and `patient`. You can add your own words in `dispatch.json`;
   - the message or any of those turns holds a secret value: a key, a token, a password. A question about passwords is not one.
-
-  Jev reads a public turn as redacted text, and a private one, or any turn with words about passwords, keys or tokens, as coarse features. It is not asked about a highly sensitive turn at all. A public turn that holds contact details counts as private.
+  - Jev reads a public turn as redacted text, and a private one, or any turn with words about passwords, keys or tokens, as coarse features. It is not asked about a highly sensitive turn at all. A public turn that holds contact details counts as private. The rest, rollout and limits included, is in [receptionist-dispatch.md](docs/receptionist-dispatch.md).
 - **Memory**: the query and up to 900 characters per passage, redacted. Your store's ids, paths and sources are replaced with `P0`, `P1`… and never sent. A passage that looks like a credential is not sent at all.
 - **Choosing turns** (`jev compact-select`, or handoffs with `HANDOFF_JEV=1`): the first and last 350 characters of each turn, redacted. Turns that look sensitive are skipped. A default handoff sends Jev nothing.
 - **Skills**: the turn, redacted, plus skill names and descriptions.
@@ -143,6 +142,7 @@ docs/              integration notes and hard-won operational lessons
 | [search-loop.md](docs/search-loop.md) | Running a search as a loop: which results to open, when to stop, and how to write candidate queries so Jev can pick one. |
 | [wiring-triage-into-a-live-pipeline.md](docs/wiring-triage-into-a-live-pipeline.md) | Adding classification to something already carrying real traffic. |
 | [hermes-compaction.md](docs/hermes-compaction.md) | Handoffs on Hermes: what we measured, what ships, and the two search calls that make a handoff enough. |
+| [receptionist-dispatch.md](docs/receptionist-dispatch.md) | Before you turn on `hermes-dispatch`: what a handed-off turn carries and what keeps it here, the privacy classes, rolling it out in shadow, and its limits. |
 | [response-caches.md](docs/response-caches.md) | Before you put a response cache in front of an agent. Why it does little for a Jev loop, and the plan cache we built instead. |
 | [evals/compaction](evals/compaction/README.md) | Measuring handoffs on your own sessions. |
 

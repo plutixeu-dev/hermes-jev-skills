@@ -11,7 +11,8 @@ Shadow decides and logs, and always lets the local call go ahead. Only a `chat_c
 provider is ever short-circuited, because that is the response shape this plugin builds.
 Everything fails open: any error in here is a local answer, never a lost turn.
 
-One classifier per turn: while `/jev routing` is on or in shadow, this plugin stands aside.
+One classifier per turn: while hermes-jev is loaded and `/jev routing` is on or in shadow, this
+plugin stands aside.
 """
 from __future__ import annotations
 
@@ -21,18 +22,30 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from .jevkit import dispatch
 
 _LOCK = threading.Lock()
-_TURNS: Dict[str, Dict[str, Any]] = {}      # session -> this turn's text and decision
+_TURNS: Dict[str, Dict[str, Any]] = {}      # session -> this turn's text, clean history and decision
 _SESSIONS: Dict[str, str] = {}              # Hermes session -> the agent session that continues it
 _MAX_SESSIONS = 256
+_HISTORY_ROWS = 64                          # a handoff reads at most 21 of them (relay caps it at 20 turns)
 _CTX: Any = None
 
 
 def _home() -> Path:
+    """The turn's own profile. A gateway that serves several profiles (`multiplex_profiles`)
+    binds each turn's profile with a context-local override and leaves HERMES_HOME at the root:
+    read alone, the variable made every profile "default", with its class, its dispatch.json and
+    its `/dispatch` switch."""
+    try:
+        from hermes_constants import get_hermes_home_override  # type: ignore
+        override = get_hermes_home_override()
+        if override:
+            return Path(override)
+    except Exception:  # noqa: BLE001 - outside Hermes, or an older one
+        pass
     return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
 
 
@@ -50,7 +63,7 @@ def _read(path: Path) -> Dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):      # ValueError: not UTF-8, or not JSON
         return {}
 
 
@@ -94,8 +107,25 @@ def _hermes_jev_routing() -> Any:
     return None
 
 
+def _hermes_jev_loaded() -> bool:
+    """Is hermes-jev loaded and enabled here. A Hermes that cannot say is taken to have it."""
+    probe = getattr(_CTX, "has_plugin", None)
+    if not callable(probe):
+        return True
+    try:
+        return bool(probe("hermes-jev"))
+    except Exception:  # noqa: BLE001 - unsure means the other classifier may be running
+        return True
+
+
 def _jev_routing_active() -> bool:
-    """hermes-jev's routing, read the way that plugin reads it: a `/jev` switch, then config.yaml."""
+    """hermes-jev's routing, read the way that plugin reads it: a `/jev` switch, then config.yaml.
+
+    Only while hermes-jev is loaded: a `/jev routing on` left behind by a removed plugin must not
+    silence dispatch forever.
+    """
+    if not _hermes_jev_loaded():
+        return False
     state = {**_read(_root() / "jev" / "state.json"), **_read(_home() / "jev" / "state.json")}
     value = state.get("routing")
     if value is None:
@@ -143,28 +173,100 @@ def _completion(text: str, model: str) -> Any:
                            created=int(time.time()), model=model, choices=[choice], usage=None)
 
 
+# Where the context Hermes injects into a turn begins: the recalled memory, then every plugin's.
+_INJECTED = "<memory-context>"
+
+
+def _said(content: Any) -> Any:
+    """One row's content without the context Hermes injected after it.
+
+    A turn made of parts keeps that context as a text part of its own (Hermes #71998), and read
+    back from the session store it is one text with the context inline. Everything from the
+    memory block on is cut. Plugin context sent without recalled memory has no mark to find.
+    """
+    if isinstance(content, str):
+        return content.split(_INJECTED, 1)[0].rstrip() if _INJECTED in content else content
+    if not isinstance(content, list):
+        return content
+    kept = []
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text" and _INJECTED in str(part.get("text") or ""):
+            part = {**part, "text": str(part.get("text")).split(_INJECTED, 1)[0].rstrip()}
+            if not part["text"]:
+                continue
+        kept.append(part)
+    return kept
+
+
+def _clean_history(rows: Any, text: str) -> Optional[List[Dict[str, Any]]]:
+    """The conversation as it was said, from `pre_llm_call`'s history, which ends with this turn.
+
+    A row's `content` is what was said. The wire copy replays each earlier user row's
+    `api_content` instead: the recalled `<memory-context>` block and every plugin's
+    `pre_llm_call` context. Compaction summaries (`_compressed_summary`) retell tool work, so they
+    stay behind too. Rows are copied, because Hermes adds this turn's context to the live row
+    later. None when Hermes passed no history (an older Hermes): the wire copy is all there is.
+    """
+    if not isinstance(rows, list):
+        return None
+    kept: List[Dict[str, Any]] = []
+    for row in reversed(rows):
+        if len(kept) >= _HISTORY_ROWS:
+            break
+        if not isinstance(row, dict) or row.get("_compressed_summary") or row.get("role") not in ("user", "assistant"):
+            continue
+        content = _said(row.get("content"))
+        if dispatch.relay.text_of(content).strip():
+            kept.append({"role": row["role"], "content": content})
+    kept.reverse()
+    if not kept or kept[-1]["role"] != "user":
+        kept.append({"role": "user", "content": text})      # the turn's own row went with a compaction summary
+    return kept
+
+
 def _on_pre_llm_call(session_id: str = "", turn_id: Any = None, user_message: Any = "",
-                     parent_session_id: str = "", platform: str = "", **_: Any) -> Any:
+                     parent_session_id: str = "", platform: str = "", conversation_history: Any = None,
+                     **_: Any) -> Any:
     # A message made of parts is handed over as its text, never as the JSON of its parts.
     text = user_message if isinstance(user_message, str) else dispatch.relay.text_of(user_message)
+    history = _clean_history(conversation_history, text)
+    key = session_id or "-"
     with _LOCK:
-        if len(_TURNS) >= _MAX_SESSIONS:
+        # Out and back in, so the map runs oldest first; only a new session makes another one go.
+        if _TURNS.pop(key, None) is None and len(_TURNS) >= _MAX_SESSIONS:
             _TURNS.pop(next(iter(_TURNS)))
-        _TURNS[session_id or "-"] = {"turn_id": turn_id, "text": text, "child": bool(parent_session_id),
-                                     "platform": str(platform or ""), "claimed": False, "decision": None}
+        _TURNS[key] = {"turn_id": turn_id, "text": text, "history": history, "child": bool(parent_session_id),
+                       "platform": str(platform or ""), "claimed": False, "decision": None}
+    return None
+
+
+def _find_turn(key: str, turn_id: Any) -> Optional[Dict[str, Any]]:
+    """This turn's record, under its session or else by its turn id. Call with _LOCK held.
+
+    Preflight compression can rotate the session id between pre_llm_call and the first provider
+    call. Hermes's turn id holds a uuid, so it names one turn whatever the session is called now.
+    """
+    turn = _TURNS.get(key)
+    if turn is not None and turn["turn_id"] == turn_id:
+        return turn
+    if turn_id:
+        return next((other for other in _TURNS.values() if other["turn_id"] == turn_id), None)
     return None
 
 
 def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: str = "", turn_id: Any = None,
                       api_mode: str = "", **_: Any) -> Any:
-    policy = dispatch.load_policy()
-    mode = _setting("mode", policy, "off")
+    try:
+        policy = dispatch.load_policy()
+        mode = _setting("mode", policy, "off")
+    except Exception:  # noqa: BLE001 - settings that cannot be read dispatch nothing
+        return next_call(request)
     if mode not in ("shadow", "on") or not isinstance(request, dict):
         return next_call(request)
     key = session_id or "-"
     with _LOCK:
-        turn = _TURNS.get(key)
-        first = bool(turn) and turn["turn_id"] == turn_id and not turn["claimed"]
+        turn = _find_turn(key, turn_id)
+        first = turn is not None and not turn["claimed"]
         if first:
             turn["claimed"] = True
     if not first or turn["child"]:
@@ -178,9 +280,13 @@ def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: st
         return next_call(request)
     live = mode == "on" and api_mode == "chat_completions"
     try:
-        messages = request.get("messages") or []
+        # The wire copy is what the local model reads, so it sizes the context. The handoff is the
+        # clean history: the wire carries recalled memory and every plugin's context in its rows.
+        # Without a history (an older Hermes) it is the wire, cut the same way where it can be.
+        wire = request.get("messages") or []
         decision = dispatch.dispatch_turn(
-            text, messages, profile=_profile(), context_tokens=len(json.dumps(messages, default=str)) // 4,
+            text, turn.get("history") or _clean_history(wire, text), profile=_profile(),
+            context_tokens=len(json.dumps(wire, default=str)) // 4,
             interactive=True, run=live, session=_SESSIONS.get(key, ""), policy=policy)
     except Exception as error:  # noqa: BLE001 - the turn goes ahead locally, and the log says why
         _log({"mode": mode, "agent": dispatch.LOCAL, "reason": f"dispatch failed ({type(error).__name__})"})
@@ -200,13 +306,14 @@ def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: st
     return next_call(request)
 
 
-def _on_transform_output(response_text: str = "", session_id: str = "", **_: Any) -> Any:
+def _on_transform_output(response_text: str = "", session_id: str = "", turn_id: Any = None, **_: Any) -> Any:
     """Say it when a turn that deserved another agent was answered here. Once per turn."""
     policy = dispatch.load_policy()
     if _setting("notice", policy, "off") != "on" or _setting("mode", policy, "off") != "on":
         return None
     with _LOCK:
-        turn = _TURNS.get(session_id or "-") or {}
+        key = session_id or "-"
+        turn = (_find_turn(key, turn_id) if turn_id else _TURNS.get(key)) or {}
         decision = turn.get("decision") or {}
         if decision.get("agent") != dispatch.LOCAL or not decision.get("downgraded") or decision.get("noticed"):
             return None
@@ -236,6 +343,8 @@ def _dispatch_command(raw_args: str = "") -> str:
              f"profile {_profile()} is {klass}"]
     if not _middleware_available():
         lines.append("  this Hermes has no llm_execution middleware: dispatch cannot act here; update Hermes")
+    for path in report.get("broken_files") or []:
+        lines.append(f"  {path} cannot be read: it turns every agent off and privacy to the strictest; fix it")
     for name, row in report["agents"].items():
         cooling = f", cooling {row['cooling_s']} s" if row["cooling_s"] else ""
         lines.append(f"  {name}: {'on' if row['enabled'] else 'off'}, {row['kind']} "
