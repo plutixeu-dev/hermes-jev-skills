@@ -43,6 +43,13 @@ Dit plan bouwt de "receptie" uit het gesprek van 24 t/m 27 september.
 The first batch was implemented and reviewed. These plan changes came out of it, and later tasks already include them:
 - **Task 1:** the TRIAGE line may lack its closing brace, so a broken line is reported as invalid JSON rather than as missing. This is the only deviation from the plan's code.
 - **Task 2b** (new): sensitive terms count in any form (plurals, compounds), an IBAN from any common country is found by its check digits, and the English verb "diagnose" no longer counts.
+- **Task 4b** (new, runs after Task 4): these fixes came from the review of Tasks 0-2.
+  - The TRIAGE check refuses null and bare-mark fields, and a parser crash becomes an error.
+  - The privacy class asks whether a secret **value** is present (`has_secret_value`), not a word about one.
+  - Contact details are read as people write them, so timestamps, git URLs and SHAs no longer count.
+  - Terms without the trema count.
+  - Bad values in `dispatch.json` are tolerated.
+  - The Task 0 modules also guard against reaching the network.
 - **Task 3:** dict settings merge one level deep, a bad number in `dispatch.json` counts as the default, and `turn_budget` and `timeout_cooldown` are added.
 - **Task 8:** `leaving_text` gives the privacy check everything a handoff would carry.
 - **Task 9:** the privacy class covers the history too, a turn has a time budget, and a timeout cools the agent for five minutes.
@@ -1092,6 +1099,228 @@ git commit -m "route: one judgement shared by routing and dispatch; dispatch: Je
 
 ---
 
+### Task 4b: Review fixes to the TRIAGE check and the privacy class (review of Tasks 0-2)
+
+The review found these problems:
+- `reason: null` and a question of just `"?"` passed the TRIAGE check.
+- Bytes, very deep JSON and a 5000-digit number raised instead of returning errors.
+- `is_sensitive` fires on words, so "How do I hash a password?" and `primary_key=True` made a public coding turn highly sensitive, and it never left. `is_sensitive` stays as it is for Jev, where skipping the call costs nothing. Dispatch now asks whether a secret **value** is present.
+- `has_contact_details` read epoch timestamps and `git@github.com` as contact details.
+- A single term given as a string was split into letters.
+- Profiles that were not a mapping crashed.
+- The reason for an unclassified profile named the wrong thing.
+- Terms written without the trema were missed.
+- The Task 0 fake key could let a future test without a transport reach the network.
+
+**Files:**
+- Modify: `jevkit/privacy.py` (add `has_secret_value` and its helpers; replace `has_contact_details`)
+- Modify: `jevkit/dispatch.py` (`check_triage`, `parse_triage`, `DEFAULT_SENSITIVE_TERMS`, `privacy_class`, new `_extra_terms`)
+- Modify: `tests/test_turn.py`, `tests/test_question_shape.py` (the network guard in `setUpModule`)
+- Test: `tests/test_dispatch.py`
+
+- [ ] **Step 1: Write the failing tests** (append; and in `test_words_about_someone_elses_file_make_it_highly_sensitive`, replace the one text holding both words with two texts: `"Vat het gespreksverslag samen"` and `"Wat vindt mijn cliënt ervan?"`)
+
+```python
+class ReviewFixTests(unittest.TestCase):
+    def klass(self, text, profile="coding", policy=POLICY):
+        return dispatch.privacy_class(text, profile=profile, policy=policy)
+
+    def test_a_null_reason_or_a_bare_question_mark_is_not_one(self):
+        _, errors = dispatch.parse_triage(line(exit="ESCALATE", signals=["G8"], niveau="frontier", reason=None))
+        self.assertTrue(any("reason" in e for e in errors))
+        _, errors = dispatch.parse_triage(line(exit="ASK", niveau=None, signals=["G4"], question="?"))
+        self.assertTrue(any("question" in e for e in errors))
+
+    def test_input_that_breaks_the_json_parser_is_an_error_not_a_crash(self):
+        self.assertIsNone(dispatch.parse_triage(b"TRIAGE {}")[0])
+        self.assertIsNone(dispatch.parse_triage("TRIAGE {\"a\": " + "[" * 100000)[0])
+        self.assertIsNone(dispatch.parse_triage('TRIAGE {"context_tokens": ' + "9" * 5000 + "}")[0])
+
+    def test_a_coding_question_about_secrets_is_not_a_secret(self):
+        for text in ("How do I hash a password in Python?", "Why is my API key rejected?",
+                     "id = Column(Integer, primary_key=True)", "cache_key = f(x)", "page_token=next_token",
+                     "export OPENAI_API_KEY=$OPENAI_API_KEY"):
+            self.assertEqual(self.klass(text)[0], "public", text)
+
+    def test_a_secret_value_is_still_highly_sensitive(self):
+        for text in ("my password is hunter22", "wachtwoord: Welkom01!", "Authorization: Bearer abcdefghijklmnop123",
+                     "-----BEGIN RSA PRIVATE KEY-----",
+                     "secret: " + "wJalrXUtnFEMI" + "/K7MDENG/bPxRfiCY" + "EXAMPLEKEY"):
+            self.assertEqual(self.klass(text)[0], "highly_sensitive", text)
+
+    def test_code_is_not_contact_details(self):
+        for text in ("git clone git@github.com:owner/repo.git", "ts=1727452076 max=2147483647",
+                     "Date.now() gave 1727452076123", "commit 73a8c72552aa0b1f", "2024-09-27 release"):
+            self.assertEqual(self.klass(text)[0], "public", text)
+
+    def test_a_phone_number_as_people_write_one_is(self):
+        for text in ("Bel me op 06-12345678", "+31 6 1234 5678", "(555) 123-4567", "020-7946099"):
+            self.assertEqual(self.klass(text)[0], "private", text)
+
+    def test_terms_without_the_trema_count(self):
+        self.assertEqual(self.klass("Hoeveel clienten heb je vandaag?")[0], "highly_sensitive")
+
+    def test_a_single_term_given_as_a_string_is_one_term(self):
+        policy = {**POLICY, "sensitive_terms": "salaris"}
+        self.assertEqual(self.klass("Wat is mijn salaris?", policy=policy), ("highly_sensitive", "mentions salaris"))
+        self.assertEqual(self.klass("Leg uit wat een bind mount is.", policy=policy)[0], "public")
+
+    def test_profiles_that_are_not_a_mapping_count_as_unclassified(self):
+        self.assertEqual(self.klass("hoi", policy={**POLICY, "profiles": ["coding"]})[0], "highly_sensitive")
+
+    def test_the_reason_says_when_a_profile_is_not_classified(self):
+        self.assertIn("not classified", self.klass("hoi", profile="onbekend")[1])
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `python3 -m unittest tests.test_dispatch.ReviewFixTests -v`
+Expected: failures on the null reason, the coding questions, code-as-contact, "clienten", the string term and the reason text; errors on the parser inputs.
+
+- [ ] **Step 3: In `jevkit/privacy.py`, add `has_secret_value` after `is_sensitive` and replace `has_contact_details`**
+
+```python
+# What a credential looks like as a value, as opposed to a word about one. `is_sensitive` answers
+# the broader question for Jev, whose call can be skipped at no cost. A handoff to another agent
+# cannot be skipped that cheaply, and "how do I hash a password?" holds no password.
+_LABELLED_VALUE = re.compile(
+    r"(?i)\b(?:password|passwd|wachtwoord|pincode|passphrase|secret|token|api[_ -]?key)\b"
+    r"(?:\s+(?:is|was|=|:)|\s*[:=])\s*[\"']?([^\s\"',;]+)")
+_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{12,}")
+_PRIVATE_KEY_BLOCK = re.compile(r"BEGIN [A-Z ]*PRIVATE KEY")
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:\(\))?")
+_NOT_A_VALUE = {"true", "false", "none", "null", "required", "incorrect", "invalid", "missing", "expired"}
+
+
+def _credential_like(value: str) -> bool:
+    """A value that could be a credential: not a code name, a keyword or a variable reference."""
+    value = value.strip().strip("\"'")
+    if len(value) < 6 or value.lower() in _NOT_A_VALUE:
+        return False
+    if value.startswith(("$", "{{", "<", "os.", "process.env")):
+        return False
+    return not (_IDENTIFIER.fullmatch(value) and not any(char.isdigit() for char in value))
+
+
+def has_secret_value(text: str) -> bool:
+    """A credential itself: a known token shape, a private key block, a bearer token, a labelled
+    value (`API_KEY=...`, `wachtwoord: ...`, "my password is ..."), or an unlabelled run of 32 or
+    more characters that mixes upper case, lower case and digits."""
+    probe = normalize(text)
+    if _TOKEN_SHAPES.search(probe) or _PRIVATE_KEY_BLOCK.search(probe) or _BEARER_VALUE.search(probe):
+        return True
+    for match in _SECRET_ASSIGNMENT.finditer(probe):
+        if _credential_like(re.split(r"[:=]", match.group(0), maxsplit=1)[1]):
+            return True
+    if any(_credential_like(match.group(1)) for match in _LABELLED_VALUE.finditer(probe)):
+        return True
+    return any(_mask_credential(match) == "[secret]" for match in _HIGH_ENTROPY.finditer(probe))
+```
+
+```python
+# Stricter than the redaction rules, on purpose: a class that fires on an epoch timestamp or a
+# `git@github.com` URL turns an ordinary coding turn private. Redaction still masks those shapes
+# in whatever leaves; this only decides the class.
+_CONTACT_EMAIL = re.compile(
+    r"(?<![\w.%+-])(?!git@)[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}\b")
+_CONTACT_PHONE = re.compile(
+    r"(?<![\w+])(?:\+\d{1,3}[\s.-]?(?:\d[\s.-]?){7,13}\d"   # international, with a plus
+    r"|(?:\+31|0031|0)6[\s-]?\d{8}"                        # Dutch mobile
+    r"|0\d{1,3}[\s-]\d{6,8}"                               # Dutch landline, with its separator
+    r"|\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4})(?!\d)")          # North American, with separators
+
+
+def has_contact_details(text: str) -> bool:
+    """An email address or a phone number as a person writes one: data about a person."""
+    probe = _LONG_HEX.sub(" ", _TRACKING.sub(" ", normalize(text)))
+    return bool(_CONTACT_EMAIL.search(probe) or _CONTACT_PHONE.search(probe))
+```
+
+- [ ] **Step 4: In `jevkit/dispatch.py`**
+
+(a) In `check_triage`, replace the three exit-field checks with:
+
+```python
+    question, assumption, reason = (record.get(key) for key in ("question", "assumption", "reason"))
+    if decision == "ASK" and not (isinstance(question, str) and question.count("?") == 1
+                                  and len(question.strip()) >= 4):
+        errors.append("ASK needs a question with exactly one question mark")
+    if decision == "ASSUME" and not (isinstance(assumption, str) and len(assumption.strip()) >= 4):
+        errors.append("ASSUME needs an assumption")
+    if decision == "ESCALATE" and not (isinstance(reason, str) and len(reason.strip()) >= 4):
+        errors.append("ESCALATE needs a reason")
+```
+
+(b) In `parse_triage`, start with `if not isinstance(text, str): return None, ["TRIAGE input is not text"]`, search `text` rather than `text or ""`, and after the `json.JSONDecodeError` handler add:
+
+```python
+    except (ValueError, RecursionError):
+        return None, ["TRIAGE is not valid JSON (too deep or too large)"]
+```
+
+(c) Add `"clienten", "patienten"` to `DEFAULT_SENSITIVE_TERMS`: they are Dutch without the trema, and not English words.
+
+(d) Add `_extra_terms` above `privacy_class`, and replace the body of `privacy_class`:
+
+```python
+def _extra_terms(policy: Dict[str, Any]) -> Tuple[str, ...]:
+    """`sensitive_terms` from dispatch.json: one string is one term, never a string of letters."""
+    extra = policy.get("sensitive_terms")
+    if isinstance(extra, str):
+        return (extra,)
+    if isinstance(extra, (list, tuple)):
+        return tuple(term for term in extra if isinstance(term, str) and term.strip())
+    return ()
+```
+
+```python
+    profiles = policy.get("profiles") if isinstance(policy.get("profiles"), dict) else {}
+    name = profile or "default"
+    classified = profiles.get(name)
+    base = classified or policy.get("default_privacy") or "highly_sensitive"
+    if base not in PRIVACY:
+        base = "highly_sensitive"
+    probe = privacy.normalize(text or "")
+    if privacy.has_secret_value(probe):
+        return "highly_sensitive", "holds a secret value"
+    lowered = probe.lower()
+    for term in DEFAULT_SENSITIVE_TERMS + _extra_terms(policy):
+        if _mentions(lowered, term):
+            return "highly_sensitive", f"mentions {term}"
+    if privacy.has_iban(probe):
+        return "highly_sensitive", "holds an IBAN"
+    if base == "public" and privacy.has_contact_details(probe):
+        return "private", "holds contact details"
+    if classified in PRIVACY:
+        return base, f"profile {name}"
+    return base, f"profile {name} is not classified, so {base}"
+```
+
+- [ ] **Step 5: Guard the network in the Task 0 modules**
+
+In the `setUpModule` of both `tests/test_turn.py` and `tests/test_question_shape.py`, after the key patch:
+
+```python
+    # With a key present, a test that forgot its transport would send its data for real.
+    guard = mock.patch.object(client, "_http_transport", side_effect=AssertionError("a test reached the network"))
+    guard.start()
+    unittest.addModuleCleanup(guard.stop)
+```
+
+- [ ] **Step 6: Run everything**
+
+Run: `env -u TYPESAFE_API_KEY -u OPENROUTER_API_KEY python3 -m unittest discover -s tests && python3 scripts/check_release.py`
+Expected: `OK` and `clean`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add jevkit/privacy.py jevkit/dispatch.py tests/test_dispatch.py tests/test_turn.py tests/test_question_shape.py
+git commit -m "dispatch: a secret is a value, not a word; contact details as people write them"
+```
+
+---
+
 ### Task 5: The Codex agent
 
 **Files:**
@@ -1602,6 +1831,10 @@ class HandoffTests(unittest.TestCase):
         chat = CHAT[:-1] + [{"role": "user", "content": "gebruik GITHUB_TOKEN=nietecht123"}]
         self.assertIsNone(relay.build_handoff(chat, agent="openai", reason="r"))
 
+    def test_a_question_about_passwords_may_leave(self):
+        chat = [{"role": "user", "content": "How do I hash a password in Python?"}]
+        self.assertIsNotNone(relay.build_handoff(chat, agent="openai", reason="r"))
+
     def test_a_handoff_to_this_machine_is_not_redacted(self):
         text = relay.build_handoff(CHAT, agent="local", reason="r", external=False)
         self.assertIn("jan@example.org", text)
@@ -1730,8 +1963,8 @@ def build_handoff(messages: Sequence[Dict[str, Any]], *, agent: str, reason: str
         return None
     asked = (request if request is not None else text_of(turns[-1]["content"])).strip()
     earlier = turns[-(max_messages + 1):-1] if max_messages > 0 else []
-    if external and (privacy.is_sensitive(asked)
-                     or any(privacy.is_sensitive(text_of(m.get("content"))) for m in [turns[-1], *earlier])):
+    if external and (privacy.has_secret_value(asked)
+                     or any(privacy.has_secret_value(text_of(m.get("content"))) for m in [turns[-1], *earlier])):
         return None
     budget = max(200, max_chars // 2)
     each = max(200, (max_chars - budget) // len(earlier)) if earlier else 0
@@ -2686,7 +2919,7 @@ Rollback is `/dispatch off`.
 - [ ] **Step 2: Add the README bullet** (in "What leaves your machine", after the Routing bullet)
 
 ```markdown
-- **Dispatch** (`hermes-dispatch`, off by default): when a turn Jev judged hard is handed to another agent, that agent's provider receives a handoff: the person's message and up to six recent user and assistant turns, text only, redacted, about 12,000 characters. System prompts, tool output, memory and files are never part of it. It stays on your machine, sent to no one, when the profile is highly sensitive (a profile you did not classify counts as one), or when the message or any turn the handoff would carry names a client or patient file, a conversation report, a treatment plan, medication, a criminal record, debts, a BSN or an IBAN, or looks like it holds a secret. The words are Dutch and extendable in `dispatch.json`. Jev itself reads the turn under the same rules as routing: redacted text for public profiles, coarse features for the rest.
+- **Dispatch** (`hermes-dispatch`, off by default): when a turn Jev judged hard is handed to another agent, that agent's provider receives a handoff: the person's message and up to six recent user and assistant turns, text only, redacted, about 12,000 characters. System prompts, tool output, memory and files are never part of it. It stays on your machine, sent to no one, when the profile is highly sensitive (a profile you did not classify counts as one), or when the message or any turn the handoff would carry names a client or patient file, a conversation report, a treatment plan, medication, a criminal record, debts, a BSN or an IBAN, or holds a secret value (a key, a token, a password; a question about passwords is not one). The words are Dutch and extendable in `dispatch.json`. Jev itself reads the turn under the same rules as routing: redacted text for public profiles, coarse features for the rest.
 ```
 
 - [ ] **Step 3: Add the CHANGELOG entry** (at the top of `## Unreleased`)
