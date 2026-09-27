@@ -2096,6 +2096,99 @@ git commit -m "relay: a redacted handoff out, the answer back unchanged under it
 
 ---
 
+### Task 8b: Keep Jev's privacy promise, and read hand-written settings as meant (review of Tasks 4b-8)
+
+The review found three problems:
+- **Jev saw text that routing withholds.** Since Task 4b a turn like "Why is my API key rejected?" is `public`, so `classify_with_jev` sent Jev its redacted text. `route.decide` sends only features for the same turn, and the README promises exactly that: a turn that looks like it holds a secret sends coarse features.
+- **An `argv` written as one string became a list of one** and could never run.
+- **A single agent name in `frontier_order`** was walked letter by letter.
+
+**Files:**
+- Modify: `jevkit/dispatch.py` (`classify_with_jev`, `load_policy`, new `_orders`)
+- Test: `tests/test_dispatch.py` (new tests; one assertion in `test_a_setting_of_the_wrong_type_keeps_its_default` changes)
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `ClassifyTests`:
+
+```python
+    def test_a_turn_with_words_about_secrets_sends_features_as_routing_does(self):
+        wire = Wire()
+        self.classify(text="Why is my API key rejected by the proxy?", transport=wire)
+        sent = json.dumps(wire.bodies)
+        self.assertNotIn("rejected by the proxy", sent)
+        self.assertIn("turn_features", sent)
+```
+
+Append to `PolicyFileTests`:
+
+```python
+    def test_an_argument_list_written_as_one_string_is_split_like_a_command_line(self):
+        loaded = self.load({"agents": {"openai": {"argv": "codex exec --json -"}}})
+        self.assertEqual(loaded["agents"]["openai"]["argv"], ["codex", "exec", "--json", "-"])
+
+    def test_one_agent_named_in_an_order_is_an_order_of_one(self):
+        loaded = self.load({"frontier_order": {"default": "openai"}})
+        self.assertEqual(loaded["frontier_order"], {"repo": ["claude", "openai"], "default": ["openai"]})
+```
+
+In `test_a_setting_of_the_wrong_type_keeps_its_default`, the claude `argv` assertion becomes `self.assertEqual(loaded["agents"]["claude"]["argv"], ["claude", "-p"])`.
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `python3 -m unittest tests.test_dispatch.ClassifyTests tests.test_dispatch.PolicyFileTests -v`
+Expected: the features test fails because the text was sent. The argv tests fail with `['codex exec --json -']` and `['claude -p']`. The order test fails with `'openai'`.
+
+- [ ] **Step 3: Change `jevkit/dispatch.py`**
+
+(a) In `classify_with_jev`, replace the `features_only = ...` line with:
+
+```python
+    # A turn that looks like it holds a secret sends Jev features only, exactly as routing does,
+    # even when its class lets it leave as a question about secrets (privacy.has_secret_value).
+    features_only = privacy_class not in (policy.get("jev_text_for") or []) or privacy.is_sensitive(inner)
+```
+
+(b) Add `import shlex` to the imports. In `load_policy`'s agent loop, directly before `if key in _AGENT_SHAPE:`, add:
+
+```python
+                    if key == "argv" and isinstance(value, str):
+                        try:
+                            value = shlex.split(value)     # a command line, as a person writes one
+                        except ValueError:                 # an unbalanced quote: keep the default
+                            continue
+```
+
+(c) Add above `load_policy`:
+
+```python
+def _orders(value: Any) -> Dict[str, List[str]]:
+    """`frontier_order` with every order a list of agent names. One name alone is an order of one."""
+    out: Dict[str, List[str]] = {}
+    for kind, order in (value.items() if isinstance(value, dict) else ()):
+        if isinstance(order, str):
+            order = [order]
+        if isinstance(order, list):
+            out[str(kind)] = [name for name in order if isinstance(name, str)]
+    return out
+```
+
+and make the last line of `load_policy`, before `return policy`: `policy["frontier_order"] = _orders(policy.get("frontier_order"))`.
+
+- [ ] **Step 4: Run everything**
+
+Run: `env -u TYPESAFE_API_KEY -u OPENROUTER_API_KEY python3 -m unittest discover -s tests && python3 scripts/check_release.py`
+Expected: `OK` and `clean`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add jevkit/dispatch.py tests/test_dispatch.py
+git commit -m "dispatch: Jev reads secret-word turns as features only; settings read as meant"
+```
+
+---
+
 ### Task 9: One turn, start to finish
 
 **Files:**
@@ -2252,6 +2345,13 @@ class CheckAgentsTests(unittest.TestCase):
                           "available": True, "cooling_s": 0})
         self.assertFalse(report["agents"]["claude"]["available"])
         self.assertFalse(report["agents"]["openrouter"]["available"])
+
+    def test_a_custom_argument_list_is_checked_by_its_own_program(self):
+        pol = policy(openai={"enabled": True, "argv": ["/opt/codex/bin/codex", "exec", "-"]})
+        seen = []
+        dispatch.check_agents(pol, which=lambda program: seen.append(program), cooling=NOT_COOLING,
+                              has_key=lambda: False)
+        self.assertIn("/opt/codex/bin/codex", seen)
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -2377,7 +2477,9 @@ def check_agents(policy: Dict[str, Any], *, which: Optional[Callable[[str], Opti
     rows: Dict[str, Any] = {}
     for name, settings in (policy.get("agents") or {}).items():
         kind = settings.get("kind")
-        program = {"codex": "codex", "claude": "claude"}.get(str(kind))
+        argv = settings.get("argv")
+        # The program that will actually run: a custom argument list names its own.
+        program = argv[0] if isinstance(argv, list) and argv else {"codex": "codex", "claude": "claude"}.get(str(kind))
         available = bool(which(program)) if program else (has_key() if kind == "openrouter" else False)
         rows[name] = {"kind": kind, "enabled": bool(settings.get("enabled")), "model": settings.get("model") or "",
                       "privacy": settings.get("privacy") or [], "available": available,
@@ -3020,10 +3122,10 @@ Rollback is `/dispatch off`.
 ```markdown
 - **Dispatch** (`hermes-dispatch`, off by default): when a turn Jev judged hard is handed to another agent, that agent's provider receives a handoff: the person's message and up to six recent user and assistant turns, text only, redacted, about 12,000 characters. System prompts, tool output, memory and files are never part of it. It stays on your machine, sent to no one, when:
   - the profile is highly sensitive (a profile you did not classify counts as one);
-  - the message, or any turn the handoff would carry, mentions a client, a patient or a file in any form (`cliënt`, `patiënt`, `dossier`), a conversation report, a treatment plan, an anamnesis, medication, a criminal record, debts, a BSN or an IBAN. The words are Dutch and you can add your own in `dispatch.json`;
+  - the message, or any turn the handoff would carry, uses a Dutch word for a client, a patient or a file. That is `cliënt` or `patiënt` in any form, `clienten` or `patienten` without the trema, and `dossier` in any form. The singular `client` and `patient` do not count, because they are English words too. It also stays when it names a conversation report, a treatment plan, an anamnesis, medication, a criminal record, debts, a BSN or an IBAN. You can add your own words in `dispatch.json`;
   - the message or any of those turns holds a secret value: a key, a token, a password. A question about passwords is not one.
 
-  Jev reads a public turn as redacted text and a private one as coarse features. It is not asked about a highly sensitive turn at all. A public turn that holds contact details counts as private.
+  Jev reads a public turn as redacted text, and a private one, or any turn with words about passwords, keys or tokens, as coarse features. It is not asked about a highly sensitive turn at all. A public turn that holds contact details counts as private.
 ```
 
 - [ ] **Step 3: Add the CHANGELOG entry** (at the top of `## Unreleased`)
@@ -3039,6 +3141,8 @@ Rollback is `/dispatch off`.
   - `privacy.has_contact_details` reads addresses and phone numbers as people write them, not timestamps or git URLs.
   - Sensitive terms count in any form.
   - `dispatch.json` values of the wrong type are ignored; `"enabled": "false"` is not a yes.
+  - One string where a list is expected is a list of one; an `argv` string is split like a command line.
+  - A turn with words about secrets sends Jev coarse features only, as routing does.
 - The TRIAGE record follows the reasoning library's routing contract, so a local receptionist can later take Jev's place as the classifier (one classifier per turn).
 - `tests/test_turn.py` and `tests/test_question_shape.py` no longer depend on a real key being installed.
 ```
