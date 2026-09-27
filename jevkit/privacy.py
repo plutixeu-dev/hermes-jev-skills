@@ -30,6 +30,8 @@ _TOKEN_SHAPES = re.compile(
 )
 _EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE = re.compile(r"(?<!\d)(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)")
+# 06 1234 5678, 06-12345678, +31 (0)6 12345678, 0031 6 ...: the North American shape above misses them all.
+_NL_MOBILE = re.compile(r"(?<![\d+])(?:\+31\s?(?:\(0\)\s?)?|0031\s?|0)6[\s-]?(?:\d[\s-]?){7}\d(?!\d)")
 # The keyword rules above only fire on a label. A bank alert or an order receipt carries
 # the card number with no trigger word anywhere near it, and "4111 1111 1111 1111" went
 # out verbatim. Luhn is what keeps this from eating order and reference numbers — the
@@ -96,36 +98,67 @@ def is_sensitive(text: str) -> bool:
 # What a credential looks like as a value, as opposed to a word about one. `is_sensitive` answers
 # the broader question for Jev, whose call can be skipped at no cost. A handoff to another agent
 # cannot be skipped that cheaply, and "how do I hash a password?" holds no password.
-_LABELLED_VALUE = re.compile(
-    r"(?i)\b(?:password|passwd|wachtwoord|pincode|passphrase|secret|token|api[_ -]?key)\b"
-    r"(?:\s+(?:is|was|=|:)|\s*[:=])\s*[\"']?([^\s\"',;]+)")
-_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{12,}")
+#
+# After a password word, any value that is not an ordinary word counts, letters-only included:
+# "my password is sunshine" leaves no doubt. After a key or token word, or in NAME=value, a value
+# counts only when it does not look like code, because `cache_key = f(x)` is everyday code.
+_PASSWORD_LABEL = r"(?:password|passwd|passphrase|wachtwoord|pincode|pin)"
+_KEY_LABEL = r"(?:secret|token|api[_ -]?key|access[_ -]?key|private[_ -]?key|client[_ -]?secret)"
+_LABELLED_VALUE = re.compile(                                       # JSON, YAML, PHP, prose
+    r"(?i)[\"']?\b(" + _PASSWORD_LABEL + r"|" + _KEY_LABEL + r")\b[\"']?"
+    r"(?:\s*(?:=>|[:=])\s*|\s+(?:is|was|=|:)\s*:?\s*)[\"']?([^\s\"',;})]+)")
+_PASSWORD_SENTENCE = re.compile(                                    # "wachtwoord van mijn bank is X"
+    r"(?i)\b" + _PASSWORD_LABEL + r"\b[^.\n?!]{0,40}?\b(?:is|was|luidt|=)\b\s*:?\s*[\"']?([^\s\"',;.!?)]+)")
+_NAMED_VALUE = re.compile(                                          # DB_PASS=, MYSQL_PWD=, pwd=
+    r"(?i)\b(?:[a-z0-9]+[_-])*(?:pass|pwd|passwd|password|secret|token|key|apikey|auth|credentials?)\b"
+    r"\s*[:=]\s*[\"']?([^\s\"',;}]+)")
+_URL_USERINFO = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@")
+_AUTH_HEADER = re.compile(r"(?i)\b(?:proxy-)?authorization\s*:\s*[a-z]+\s+[A-Za-z0-9._~+/=-]{6,}")
+_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}")
+_CLI_SECRET = re.compile(
+    r"(?i)(?:--password[= ]\s*(?![-$])\S+"
+    r"|\bmysql\w*\b[^\n]*?\s-p(?![\s$])\S+"
+    r"|\bsshpass\s+-p\s*(?!\$)\S+"
+    r"|\bcurl\b[^\n]*?\s(?:-u|--user)\s+[^\s:]+:(?!\$)\S+)")
 _PRIVATE_KEY_BLOCK = re.compile(r"BEGIN [A-Z ]*PRIVATE KEY")
-_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:\(\))?")
-_NOT_A_VALUE = {"true", "false", "none", "null", "required", "incorrect", "invalid", "missing", "expired"}
+_CODE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:\(\))?")
+_NOT_A_VALUE = {
+    "true", "false", "none", "null", "nil", "undefined", "required", "incorrect", "invalid", "missing", "expired",
+    "wrong", "correct", "empty", "blank", "set", "unset", "reset", "changed", "hashed", "encrypted", "stored",
+    "saved", "sent", "shown", "visible", "hidden", "weak", "strong", "long", "short", "too", "not", "no", "also",
+    "still", "now", "being", "the", "a", "an", "my", "your", "our", "their", "this", "that", "same", "different",
+    "used", "needed", "checked", "validated", "rejected", "accepted", "ok", "okay", "fine", "leaked", "compromised",
+    "secure", "insecure", "niet", "fout", "goed", "verkeerd", "leeg", "gewijzigd", "veranderd", "verlopen",
+    "vergeten", "onjuist", "juist", "te", "nog", "ook", "het", "de", "een", "mijn", "jouw", "sterk", "zwak", "kort",
+    "lang", "opgeslagen", "versleuteld"}
 
 
-def _credential_like(value: str) -> bool:
-    """A value that could be a credential: not a code name, a keyword or a variable reference."""
+def _value_like(value: str, strict: bool) -> bool:
+    """Could this be the credential itself. `strict` after key and token words: not if it looks like code."""
     value = value.strip().strip("\"'")
-    if len(value) < 6 or value.lower() in _NOT_A_VALUE:
+    if len(value) < 4 or value.lower() in _NOT_A_VALUE:
         return False
-    if value.startswith(("$", "{{", "<", "os.", "process.env")):
+    if value.startswith(("$", "{{", "<", "%", "os.", "process.env", "env.", "config.", "settings.")):
         return False
-    return not (_IDENTIFIER.fullmatch(value) and not any(char.isdigit() for char in value))
+    if not strict:
+        return True
+    if len(value) < 6 or any(char in value for char in "([{"):
+        return False
+    return not (_CODE_NAME.fullmatch(value) and not any(char.isdigit() for char in value))
 
 
 def has_secret_value(text: str) -> bool:
-    """A credential itself: a known token shape, a private key block, a bearer token, a labelled
-    value (`API_KEY=...`, `wachtwoord: ...`, "my password is ..."), or an unlabelled run of 32 or
-    more characters that mixes upper case, lower case and digits."""
+    """A credential itself in the text, in any of the forms people and programs write one."""
     probe = normalize(text)
-    if _TOKEN_SHAPES.search(probe) or _PRIVATE_KEY_BLOCK.search(probe) or _BEARER_VALUE.search(probe):
-        return True
-    for match in _SECRET_ASSIGNMENT.finditer(probe):
-        if _credential_like(re.split(r"[:=]", match.group(0), maxsplit=1)[1]):
+    for shape in (_TOKEN_SHAPES, _PRIVATE_KEY_BLOCK, _BEARER_VALUE, _AUTH_HEADER, _URL_USERINFO, _CLI_SECRET):
+        if shape.search(probe):
             return True
-    if any(_credential_like(match.group(1)) for match in _LABELLED_VALUE.finditer(probe)):
+    for match in _LABELLED_VALUE.finditer(probe):
+        if _value_like(match.group(2), strict=not re.fullmatch(r"(?i)" + _PASSWORD_LABEL, match.group(1))):
+            return True
+    if any(_value_like(match.group(1), strict=False) for match in _PASSWORD_SENTENCE.finditer(probe)):
+        return True
+    if any(_value_like(match.group(1), strict=True) for match in _NAMED_VALUE.finditer(probe)):
         return True
     return any(_mask_credential(match) == "[secret]" for match in _HIGH_ENTROPY.finditer(probe))
 
@@ -145,7 +178,7 @@ _CONTACT_PHONE = re.compile(
 def has_contact_details(text: str) -> bool:
     """An email address or a phone number as a person writes one: data about a person."""
     probe = _LONG_HEX.sub(" ", _TRACKING.sub(" ", normalize(text)))
-    return bool(_CONTACT_EMAIL.search(probe) or _CONTACT_PHONE.search(probe))
+    return bool(_CONTACT_EMAIL.search(probe) or _CONTACT_PHONE.search(probe) or _NL_MOBILE.search(probe))
 
 
 # The IBAN registry: country and length. A wrong or missing entry only means a miss for that
@@ -202,6 +235,7 @@ def redact(text: str, limit: int = 4000) -> str:
     out = _HIGH_ENTROPY.sub(_mask_credential, out)
     out = _CARD.sub(_mask_card, out)
     out = _EMAIL.sub("[email]", out)
+    out = _NL_MOBILE.sub("[phone]", out)
     out = _PHONE.sub("[phone]", out)
     out = _INTL_PHONE.sub("[phone]", out)
     for index, value in enumerate(held):

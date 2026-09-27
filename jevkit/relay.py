@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence
 from . import privacy
 
 _IMAGE_PARTS = ("image_url", "input_image", "image")
+_MAX_HISTORY = 20                  # more history than this is never sent, whatever the setting
 
 
 def text_of(content: Any) -> str:
@@ -54,6 +55,7 @@ def leaving_text(messages: Sequence[Dict[str, Any]], *, request: Optional[str] =
 
     Checking only the newest message let an earlier one about a client file leave as history.
     """
+    max_messages = max(0, min(int(max_messages), _MAX_HISTORY))
     turns = _turns(messages)
     if not turns or turns[-1].get("role") != "user":
         return request or ""
@@ -69,6 +71,7 @@ def build_handoff(messages: Sequence[Dict[str, Any]], *, agent: str, reason: str
     `request`, when given, is the person's own words for this turn: what plugins appended to the
     user message (a skill suggestion, a handoff capsule) is then left behind.
     """
+    max_messages = max(0, min(int(max_messages), _MAX_HISTORY))
     turns = _turns(messages)
     if not turns or turns[-1].get("role") != "user":
         return None
@@ -85,8 +88,8 @@ def build_handoff(messages: Sequence[Dict[str, Any]], *, agent: str, reason: str
             return privacy.redact(text, limit)
         return text if len(text) <= limit else text[:limit] + " […]"
 
-    lines = ["<handoff>", f"To: {agent}", f"Reason: {reason}", f"Request: {clean(asked, budget)}",
-             "Constraints: answer in writing only; change no files and no systems; "
+    lines = ["<handoff>", f"To: {agent}", f"Reason: {clean(reason, 300)}", f"Request: {clean(asked, budget)}",
+             "Constraints: answer in writing only; read no files and run no commands; change nothing; "
              "answer in the language of the request",
              "Evidence: " + ("the recent conversation below" if earlier else "nothing beyond the request"),
              "Tried: nothing yet",

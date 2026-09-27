@@ -77,6 +77,15 @@ class HandoffTests(unittest.TestCase):
         self.assertTrue(relay.has_images(chat))
         self.assertFalse(relay.has_images(CHAT))
 
+    def test_the_reason_line_is_redacted_too(self):
+        text = relay.build_handoff(CHAT, agent="openai", reason="asked by jan@example.org")
+        self.assertNotIn("jan@example.org", text)
+
+    def test_a_huge_history_setting_is_capped(self):
+        chat = [{"role": "user" if i % 2 == 0 else "assistant", "content": "x" * 500} for i in range(401)]
+        self.assertLess(len(relay.build_handoff(chat, agent="openai", reason="r", max_messages=200)), 20000)
+        self.assertEqual(relay.leaving_text(chat, max_messages=200).count("\n"), relay._MAX_HISTORY)
+
 
 class RelayTests(unittest.TestCase):
     def test_the_answer_comes_back_unchanged_under_its_author(self):

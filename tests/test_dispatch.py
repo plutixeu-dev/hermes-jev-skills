@@ -660,3 +660,43 @@ class CliTests(unittest.TestCase):
             code, out = self.run_cli("dispatch", "check")
         self.assertEqual(code, 0)
         self.assertEqual(set(out["agents"]), {"openai", "claude", "openrouter"})
+
+
+AWS_LIKE = "wJalrXUtnFEMI" + "/K7MDENG/bPxRfiCY" + "EXAMPLEKEY"    # built at runtime: no key shape in the source
+
+SECRET_FORMS = [
+    '{"password": "Welkom01!"}', "'password' => 'Welkom01!'", '"api_key": "abcd1234efgh"',
+    "https://admin:Welkom01!@db.example.org/app", "redis://:pw1234@host:6379", "password is: Welkom01",
+    "wachtwoord van mijn bank is Zonnebloem", "my password is sunshine", "Authorization: Basic dXNlcjpwYXNz",
+    "mysql -u root -pWelkom01 db", "run it with --password Welkom01", "curl -u admin:Welkom01 https://x.y",
+    "DB_PASS=Welkom01", "MYSQL_PWD=Welkom01", "pwd=Welkom01", "pincode: 4829", "mijn pincode is 4829",
+    "mijn OPENAI_API_KEY=nietecht123", "GITHUB_TOKEN=nietecht123", "my password is hunter22", "wachtwoord: Welkom01!",
+    "Authorization: Bearer abcdefghijklmnop123", "-----BEGIN RSA PRIVATE KEY-----", "secret: " + AWS_LIKE,
+    "password: 'hunter2'", "my password is hunter2, store it", "sshpass -p Welkom01 ssh host",
+]
+NOT_SECRETS = [
+    "How do I hash a password in Python?", "Why is my API key rejected?", "id = Column(Integer, primary_key=True)",
+    "cache_key = f(x)", "page_token=next_token", "the password is incorrect", "export OPENAI_API_KEY=$OPENAI_API_KEY",
+    "My password is too short, what is the minimum?", "The password is hashed with bcrypt", "the token is expired",
+    "API key is invalid, how do I rotate it?", "sort_key=lambda x: x", "Which password manager do you recommend?",
+    "Mijn wachtwoord is vergeten, hoe reset ik het?", "wachtwoord is niet sterk genoeg", "gcc -pthread main.c",
+    "git log -p", "password: required", "The API key is stored in the keychain",
+    "token = request.headers['X-Token']", "key = config.get('key')", "set PASSWORD in your .env file",
+    "curl -u $USER:$TOKEN https://api", "Use --password-stdin with docker login", "mysql -u root -p mydb",
+    "for key, value in items.items():", "headers = {'Authorization': f'Bearer {token}'}",
+]
+
+
+class SecretValueTests(unittest.TestCase):
+    def test_every_common_form_of_a_secret_value_is_caught(self):
+        for text in SECRET_FORMS:
+            self.assertTrue(dispatch.privacy.has_secret_value(text), text)
+
+    def test_questions_and_code_about_secrets_are_not_secrets(self):
+        for text in NOT_SECRETS:
+            self.assertFalse(dispatch.privacy.has_secret_value(text), text)
+
+    def test_dutch_mobile_numbers_in_every_usual_spelling(self):
+        for text in ("06 1234 5678", "06-1234 5678", "+31 (0)6 12345678", "0612345678"):
+            self.assertTrue(dispatch.privacy.has_contact_details(text), text)
+            self.assertNotIn("5678", dispatch.privacy.redact(f"bel {text} morgen"), text)
