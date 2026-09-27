@@ -1031,8 +1031,8 @@ In `decide`:
 
 - [ ] **Step 4: Prove the refactor changed nothing**
 
-Run: `python3 -m unittest tests.test_jevkit tests.test_route_health tests.test_turn tests.test_plugin_middleware tests.test_reported_bugs`
-Expected: `OK`, the same count as before the change.
+Run: `PYTHONPATH=tests python3 -m unittest tests.test_jevkit tests.test_route_health tests.test_turn tests.test_plugin_middleware tests.test_reported_bugs`
+Expected: `OK`, the same count as before the change (284). Without `PYTHONPATH=tests`, three of these modules cannot import `_wire` and only 26 tests run.
 
 - [ ] **Step 5: Add `classify_with_jev` to `jevkit/dispatch.py`**
 
@@ -1294,6 +1294,77 @@ def _extra_terms(policy: Dict[str, Any]) -> Tuple[str, ...]:
     if classified in PRIVACY:
         return base, f"profile {name}"
     return base, f"profile {name} is not classified, so {base}"
+```
+
+(e) Give `load_policy` a shape check, found in the review of Tasks 2b-4. A value from a file now replaces a default only when it has the default's type. The worst case this closes: `"enabled": "false"` (a string) used to count as enabled, so turns could leave. The same check stops a list in `frontier_order`, `tier_to_niveau` or `handoff` from crashing a turn later. Add above `load_policy`:
+
+```python
+# Every agent setting the code reads, with the type a file must give it. A value of another
+# type is dropped and the default stays: `"enabled": "false"` is a string, so it is not a yes.
+_AGENT_SHAPE: Dict[str, Any] = {"kind": "", "enabled": False, "model": "", "privacy": [], "only_repo": False,
+                                "max_turns": 8, "timeout": 600, "cooldown": 1800, "context_tokens": 0, "argv": []}
+
+
+def _fits(default: Any, value: Any) -> bool:
+    """Does a value from a file have the type of the default it would replace."""
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    if isinstance(default, (int, float)):
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if isinstance(default, str):
+        return isinstance(value, str)
+    if isinstance(default, list):
+        return isinstance(value, list) and all(isinstance(item, str) for item in value)
+    if isinstance(default, dict):
+        return isinstance(value, dict)
+    return True
+```
+
+In `load_policy`, only a fitting value lands. Replace the two loops with:
+
+```python
+        agents = layer.get("agents")
+        if isinstance(agents, dict):
+            for name, settings in agents.items():
+                if not isinstance(settings, dict):
+                    continue
+                merged = dict(policy["agents"].get(name, {}))
+                for key, value in settings.items():
+                    if key not in _AGENT_SHAPE or _fits(_AGENT_SHAPE[key], value):
+                        merged[key] = value
+                policy["agents"][name] = merged
+        for key, value in layer.items():
+            if key == "agents" or (key in DEFAULT_POLICY and not _fits(DEFAULT_POLICY[key], value)):
+                continue
+            # One level deep, so a file that changes one order or one profile keeps the others.
+            if isinstance(value, dict) and isinstance(policy.get(key), dict):
+                policy[key] = {**policy[key], **value}
+            else:
+                policy[key] = value
+```
+
+Tests (append to `PolicyFileTests`):
+
+```python
+    def load(self, layer):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dispatch.json"
+            path.write_text(json.dumps(layer))
+            return dispatch.load_policy(path)
+
+    def test_enabled_written_as_a_string_is_not_a_yes(self):
+        loaded = self.load({"profiles": {"default": "private"}, "agents": {"openai": {"enabled": "false"}}})
+        self.assertIs(loaded["agents"]["openai"]["enabled"], False)
+        self.assertEqual(dispatch.choose_route(triage(), loaded, cooling=NOT_COOLING)["agent"], "local")
+
+    def test_a_setting_of_the_wrong_type_keeps_its_default(self):
+        loaded = self.load({"frontier_order": ["openai"], "tier_to_niveau": [], "handoff": 5, "turn_budget": "lang",
+                            "agents": {"claude": {"argv": "claude -p", "timeout": "600", "model": "opus"}}})
+        defaults = dispatch.load_policy(NOWHERE)
+        for key in ("frontier_order", "tier_to_niveau", "handoff", "turn_budget"):
+            self.assertEqual(loaded[key], defaults[key], key)
+        self.assertNotIn("argv", loaded["agents"]["claude"])
+        self.assertEqual((loaded["agents"]["claude"]["timeout"], loaded["agents"]["claude"]["model"]), (600, "opus"))
 ```
 
 - [ ] **Step 5: Guard the network in the Task 0 modules**
@@ -2136,7 +2207,14 @@ class TurnTests(unittest.TestCase):
         chat = [{"role": "user", "content": "Vat het dossier van mijn cliënt samen"}]
         out = self.turn(live_policy(openai=ON), chat=chat, answers_=None, runners={"codex": self.runner("codex")})
         self.assertEqual((out["agent"], out["privacy"]), ("local", "highly_sensitive"))
+        self.assertIn("highly sensitive", out["reason"])
         self.assertEqual(self.calls, [])
+
+    def test_a_bad_max_turns_does_not_crash_the_turn(self):
+        pol = live_policy(claude={"enabled": True, "only_repo": False})
+        pol["agents"]["claude"]["max_turns"] = "veel"
+        out = self.turn(pol, runners={"claude": self.runner("claude")})
+        self.assertEqual(out["agent"], "claude")
 
     def test_an_image_stays_here_for_now(self):
         chat = [{"role": "user", "content": [{"type": "text", "text": "Wat staat hier?"},
@@ -2184,7 +2262,7 @@ def run_agent(chosen: Dict[str, Any], prompt: str, *, policy: Dict[str, Any], se
         return agents.run_codex(prompt, model=model, timeout=timeout, argv=settings.get("argv"),
                                 runner=runners.get("codex"))
     if kind == "claude":
-        return agents.run_claude(prompt, model=model, session=session, max_turns=int(settings.get("max_turns") or 8),
+        return agents.run_claude(prompt, model=model, session=session, max_turns=_int(settings.get("max_turns"), 8) or 8,
                                  timeout=timeout, argv=settings.get("argv"), runner=runners.get("claude"))
     if kind == "openrouter":
         return agents.run_openrouter(prompt, model=model, timeout=timeout, transport=transport)
@@ -2226,6 +2304,9 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
                                interactive=interactive, config=config, transport=transport, answers=answers)
     out: Dict[str, Any] = {"privacy": klass, "privacy_why": why, "jev": triage.get("jev"),
                            "triage": {k: v for k, v in triage.items() if k != "jev"}, "attempts": []}
+    if klass == "highly_sensitive":
+        # Said before the route is chosen, so the log names the real reason, not "standard work".
+        return {**out, **_local(f"highly sensitive ({why}): this machine answers", [])}
     if relay.has_images(messages):
         return {**out, **_local("the turn carries an image; a handed-off turn is text only for now", [],
                                 downgraded=triage.get("niveau") == "frontier")}
@@ -2919,7 +3000,12 @@ Rollback is `/dispatch off`.
 - [ ] **Step 2: Add the README bullet** (in "What leaves your machine", after the Routing bullet)
 
 ```markdown
-- **Dispatch** (`hermes-dispatch`, off by default): when a turn Jev judged hard is handed to another agent, that agent's provider receives a handoff: the person's message and up to six recent user and assistant turns, text only, redacted, about 12,000 characters. System prompts, tool output, memory and files are never part of it. It stays on your machine, sent to no one, when the profile is highly sensitive (a profile you did not classify counts as one), or when the message or any turn the handoff would carry names a client or patient file, a conversation report, a treatment plan, medication, a criminal record, debts, a BSN or an IBAN, or holds a secret value (a key, a token, a password; a question about passwords is not one). The words are Dutch and extendable in `dispatch.json`. Jev itself reads the turn under the same rules as routing: redacted text for public profiles, coarse features for the rest.
+- **Dispatch** (`hermes-dispatch`, off by default): when a turn Jev judged hard is handed to another agent, that agent's provider receives a handoff: the person's message and up to six recent user and assistant turns, text only, redacted, about 12,000 characters. System prompts, tool output, memory and files are never part of it. It stays on your machine, sent to no one, when:
+  - the profile is highly sensitive (a profile you did not classify counts as one);
+  - the message, or any turn the handoff would carry, mentions a client, a patient or a file in any form (`cliënt`, `patiënt`, `dossier`), a conversation report, a treatment plan, an anamnesis, medication, a criminal record, debts, a BSN or an IBAN. The words are Dutch and you can add your own in `dispatch.json`;
+  - the message or any of those turns holds a secret value: a key, a token, a password. A question about passwords is not one.
+
+  Jev reads a public turn as redacted text and a private one as coarse features. It is not asked about a highly sensitive turn at all. A public turn that holds contact details counts as private.
 ```
 
 - [ ] **Step 3: Add the CHANGELOG entry** (at the top of `## Unreleased`)
@@ -2929,6 +3015,12 @@ Rollback is `/dispatch off`.
 
 - New `hermes-dispatch` plugin (off by default) and `jev dispatch`. On the first provider call of a turn, `llm_execution` middleware classifies the turn with Jev, applies a deterministic policy (privacy class, level, context window, cooldowns, order), and either lets the local call go ahead or hands the turn to Codex on a ChatGPT login, Claude Code, or OpenRouter. The answer comes back unchanged under one line naming its author. Shadow mode decides and logs only. A quota, auth or missing-program failure cools that agent for every lane through the ladder, a timeout cools it for five minutes, and the next agent or the local model answers. A turn spends at most `turn_budget` (15 minutes) on agents. The privacy class covers every turn a handoff would carry, not only the newest.
 - `route.judge_answers`, `route.clip_ask` and `route.is_risky` are extracted from `route.decide` with no change in behaviour, so routing and dispatch share one calibrated judgement.
+- Privacy for dispatch:
+  - `privacy.has_secret_value` asks whether a credential value is present, not a word about one.
+  - `privacy.has_iban` finds an IBAN from any common country by its check digits.
+  - `privacy.has_contact_details` reads addresses and phone numbers as people write them, not timestamps or git URLs.
+  - Sensitive terms count in any form.
+  - `dispatch.json` values of the wrong type are ignored; `"enabled": "false"` is not a yes.
 - The TRIAGE record follows the reasoning library's routing contract, so a local receptionist can later take Jev's place as the classifier (one classifier per turn).
 - `tests/test_turn.py` and `tests/test_question_shape.py` no longer depend on a real key being installed.
 ```
