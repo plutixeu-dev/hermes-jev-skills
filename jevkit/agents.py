@@ -32,6 +32,8 @@ _AUTH = re.compile(r"(?i)(not logged in|please log ?in|log ?in required|unauthor
 
 CODEX_ARGV = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only",
               "--model", "{model}", "--output-last-message", "{output}", "-"]
+CLAUDE_ARGV = ["claude", "-p", "--output-format", "json", "--model", "{model}", "--max-turns", "{max_turns}",
+               "--permission-mode", "plan", "--resume", "{session}"]
 
 Runner = Callable[[Sequence[str], str, float], Any]   # (argv, stdin, timeout) -> CompletedProcess-like
 
@@ -122,3 +124,24 @@ def run_codex(prompt: str, *, model: str = "", timeout: float = 600.0, argv: Opt
     if not text:
         raise AgentError("failed", "codex finished without an answer")
     return Result(text=text, model=model)
+
+
+def run_claude(prompt: str, *, model: str = "", session: str = "", max_turns: int = 8, timeout: float = 600.0,
+               argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) -> Result:
+    """One `claude -p` run on the Claude Code login. Plan mode: it answers and edits nothing.
+
+    Never `--bare`: that mode ignores the subscription login and needs an API key.
+    """
+    done = _call(fill(argv or CLAUDE_ARGV, model=model, session=session, max_turns=max_turns),
+                 prompt, timeout, runner)
+    try:
+        data = json.loads(done.stdout or "")
+    except json.JSONDecodeError:
+        data = None
+    if done.returncode != 0 or not isinstance(data, dict) or data.get("is_error"):
+        said = str(data.get("result") or "") if isinstance(data, dict) else ""
+        raise _failure("claude", f"{said}\n{done.stdout or ''}\n{done.stderr or ''}", done.returncode)
+    text = str(data.get("result") or "").strip()
+    if not text:
+        raise AgentError("failed", "claude finished without an answer")
+    return Result(text=text, model=model, session=str(data.get("session_id") or ""))

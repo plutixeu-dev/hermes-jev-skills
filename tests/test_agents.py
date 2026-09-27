@@ -92,3 +92,48 @@ class CodexTests(unittest.TestCase):
         with self.assertRaises(agents.AgentError) as caught:
             agents.run_codex(PROMPT, runner=FakeRun())
         self.assertEqual(caught.exception.code, "failed")
+
+
+def claude_json(**fields):
+    body = {"type": "result", "subtype": "success", "is_error": False, "result": "Het antwoord.",
+            "session_id": "sess-1"}
+    body.update(fields)
+    return json.dumps(body)
+
+
+class ClaudeTests(unittest.TestCase):
+    def test_an_answer_and_its_session_come_back(self):
+        run = FakeRun(stdout=claude_json())
+        result = agents.run_claude(PROMPT, model="opus", runner=run)
+        self.assertEqual((result.text, result.session), ("Het antwoord.", "sess-1"))
+        self.assertEqual(run.stdin, PROMPT)
+        self.assertNotIn("geheim", " ".join(run.argv))
+
+    def test_it_plans_and_edits_nothing_by_default(self):
+        run = FakeRun(stdout=claude_json())
+        agents.run_claude(PROMPT, runner=run)
+        self.assertEqual(run.argv[run.argv.index("--permission-mode") + 1], "plan")
+        self.assertNotIn("--bare", run.argv)
+
+    def test_a_session_is_resumed_only_when_there_is_one(self):
+        run = FakeRun(stdout=claude_json())
+        agents.run_claude(PROMPT, runner=run)
+        self.assertNotIn("--resume", run.argv)
+        agents.run_claude(PROMPT, session="sess-1", runner=run)
+        self.assertEqual(run.argv[run.argv.index("--resume") + 1], "sess-1")
+
+    def test_a_usage_limit_is_quota(self):
+        run = FakeRun(returncode=1, stdout=claude_json(is_error=True, result="Claude AI usage limit reached|1760000000"))
+        with self.assertRaises(agents.AgentError) as caught:
+            agents.run_claude(PROMPT, runner=run)
+        self.assertEqual(caught.exception.code, "quota")
+
+    def test_an_error_result_with_exit_zero_is_still_an_error(self):
+        run = FakeRun(stdout=claude_json(is_error=True, subtype="error_max_turns", result=""))
+        with self.assertRaises(agents.AgentError) as caught:
+            agents.run_claude(PROMPT, runner=run)
+        self.assertEqual(caught.exception.code, "failed")
+
+    def test_output_that_is_not_json_is_a_failure(self):
+        with self.assertRaises(agents.AgentError):
+            agents.run_claude(PROMPT, runner=FakeRun(stdout="Welcome to Claude Code"))
