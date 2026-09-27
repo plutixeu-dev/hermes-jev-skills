@@ -127,3 +127,119 @@ class PrivacyTermTests(unittest.TestCase):
     def test_a_code_that_only_looks_like_an_iban_is_not_one(self):
         self.assertFalse(dispatch.privacy.has_iban("NL12 ABNA 0417 1643 00"))
         self.assertFalse(dispatch.privacy.has_iban("Libanon, AB12 CDEF, DE12 3456"))
+
+
+NOWHERE = Path("/nonexistent/dispatch.json")
+NOT_COOLING = lambda name: 0.0  # noqa: E731
+ON = {"enabled": True}
+
+
+def triage(**fields):
+    record = {"type": "CHANGE", "exit": "ESCALATE", "signals": ["G8"], "niveau": "frontier", "privacy": "private",
+              "context_tokens": 2000, "repo_werk": False, "interactief": True, "reason": "hard work"}
+    record.update(fields)
+    return record
+
+
+def policy(**agents):
+    base = dispatch.load_policy(NOWHERE)
+    for name, settings in agents.items():
+        base["agents"][name] = {**base["agents"][name], **settings}
+    return base
+
+
+class ChooseRouteTests(unittest.TestCase):
+    def route(self, record, pol, cooling=NOT_COOLING):
+        return dispatch.choose_route(record, pol, cooling=cooling)
+
+    def test_everything_below_frontier_stays_here(self):
+        for niveau in ("tiny", "fast", "standard"):
+            self.assertEqual(self.route(triage(niveau=niveau, exit="PROCEED", signals=[]), policy(openai=ON))["agent"],
+                             "local")
+
+    def test_a_missing_level_means_standard_never_the_cloud(self):
+        self.assertEqual(self.route(triage(niveau=None), policy(openai=ON))["agent"], "local")
+
+    def test_a_question_goes_to_the_person(self):
+        record = triage(exit="ASK", niveau=None, question="Welke?")
+        self.assertEqual(self.route(record, policy(openai=ON))["agent"], "local")
+
+    def test_highly_sensitive_never_leaves_and_says_so(self):
+        pol = policy(openai=ON, claude=ON, openrouter={"enabled": True, "model": "x/y"})
+        chosen = self.route(triage(privacy="highly_sensitive"), pol)
+        self.assertEqual((chosen["agent"], chosen["downgraded"]), ("local", True))
+
+    def test_frontier_work_goes_to_openai_first(self):
+        pol = policy(openai=ON, claude={"enabled": True, "only_repo": False})
+        self.assertEqual(self.route(triage(), pol)["agent"], "openai")
+
+    def test_repository_work_goes_to_claude_first(self):
+        self.assertEqual(self.route(triage(repo_werk=True), policy(openai=ON, claude=ON))["agent"], "claude")
+
+    def test_claude_takes_only_repository_work_by_default(self):
+        chosen = self.route(triage(), policy(claude=ON))
+        self.assertEqual(chosen["agent"], "local")
+        self.assertIn({"agent": "claude", "skipped": "only for repository work"}, chosen["considered"])
+
+    def test_a_cooling_agent_is_skipped_for_the_next(self):
+        pol = policy(openai=ON, claude={"enabled": True, "only_repo": False})
+        chosen = self.route(triage(), pol, cooling=lambda name: 900.0 if name == "openai" else 0.0)
+        self.assertEqual(chosen["agent"], "claude")
+
+    def test_the_last_resort_takes_public_turns_only_whatever_its_settings_say(self):
+        pol = policy(openrouter={"enabled": True, "model": "x/y", "privacy": ["public", "private"]})
+        self.assertEqual(self.route(triage(privacy="private"), pol)["agent"], "local")
+        self.assertEqual(self.route(triage(privacy="public"), pol)["agent"], "openrouter")
+
+    def test_nothing_enabled_is_a_visible_downgrade(self):
+        chosen = self.route(triage(), policy())
+        self.assertEqual((chosen["agent"], chosen["downgraded"]), ("local", True))
+        self.assertEqual([c["agent"] for c in chosen["considered"]], ["openai", "claude", "openrouter"])
+
+    def test_a_conversation_too_long_for_the_agent_is_not_sent(self):
+        pol = policy(openai={"enabled": True, "context_tokens": 64_000})
+        self.assertEqual(self.route(triage(context_tokens=100_000), pol)["agent"], "local")
+
+    def test_max_lokaal_in_the_chat_is_answered_here_now(self):
+        self.assertEqual(self.route(triage(niveau="max_lokaal"), policy(openai=ON))["agent"], "local")
+
+    def test_a_window_that_is_not_a_number_is_ignored(self):
+        pol = policy(openai={"enabled": True, "context_tokens": "veel"})
+        self.assertEqual(self.route(triage(), pol)["agent"], "openai")
+
+
+class PolicyFileTests(unittest.TestCase):
+    def test_a_file_overrides_one_agent_setting_and_keeps_the_rest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dispatch.json"
+            path.write_text(json.dumps({"profiles": {"default": "private"},
+                                        "agents": {"openai": {"enabled": True, "model": "gpt-6-sol"}}}))
+            loaded = dispatch.load_policy(path)
+        self.assertEqual(loaded["profiles"], {"default": "private"})
+        self.assertEqual((loaded["agents"]["openai"]["model"], loaded["agents"]["openai"]["kind"]), ("gpt-6-sol", "codex"))
+        self.assertIn("claude", loaded["agents"])
+
+    def test_changing_one_order_keeps_the_other(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dispatch.json"
+            path.write_text(json.dumps({"frontier_order": {"default": ["claude"]}}))
+            loaded = dispatch.load_policy(path)
+        self.assertEqual(loaded["frontier_order"], {"repo": ["claude", "openai"], "default": ["claude"]})
+
+    def test_a_broken_file_leaves_the_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dispatch.json"
+            path.write_text("{not json")
+            self.assertEqual(dispatch.load_policy(path)["mode"], "off")
+
+    def test_loading_twice_shares_nothing(self):
+        first = dispatch.load_policy(NOWHERE)
+        first["agents"]["openai"]["enabled"] = True
+        self.assertFalse(dispatch.load_policy(NOWHERE)["agents"]["openai"]["enabled"])
+
+    def test_the_environment_names_the_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mine.json"
+            path.write_text(json.dumps({"mode": "shadow"}))
+            with mock.patch.dict(os.environ, {"JEV_DISPATCH_POLICY": str(path)}):
+                self.assertEqual(dispatch.load_policy()["mode"], "shadow")
