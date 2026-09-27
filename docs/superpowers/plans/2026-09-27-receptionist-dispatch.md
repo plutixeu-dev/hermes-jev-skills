@@ -3311,6 +3311,187 @@ git commit -m "dispatch: a broken setting in a later file makes things stricter,
 
 ---
 
+### Task 10f: The CLI reads a turn as the chat would, and the time budget holds everywhere (review of Tasks 8b-10)
+
+The review found these problems in `jev dispatch` and the time budget:
+- With `messages` but no `prompt`, the command judged an empty turn. Under `--run` the agent received `Request:` with no question.
+- A `prompt` with a history ending in an assistant reply always stayed local, with a false reason.
+- `--privacy public` could loosen a highly sensitive profile. It must only ever tighten.
+- Input that was not a JSON object gave a traceback.
+- Shadow ignored a `turn_budget` below 30 s, so shadow and live disagreed.
+- `remaining` was not capped at the budget.
+- A negative agent `timeout` started the CLI and killed it at once.
+- A timeout caused by the turn budget, not by the agent, cooled the seat for every lane.
+
+This task runs after Task 10e, so the refuse calls already use `_rung(...)`.
+
+**Files:**
+- Modify: `jevkit/cli.py` (`cmd_dispatch`)
+- Modify: `jevkit/dispatch.py` (`stricter`, `_agent_limit`, `run_agent`, `dispatch_turn`)
+- Test: `tests/test_dispatch.py`
+
+- [ ] **Step 1: Write the failing tests** (append to `CliTests` and `TurnTests`)
+
+```python
+    # --- CliTests ---
+    def run_stdin(self, payload, *argv, policy=None):
+        buffer = io.StringIO()
+        with mock.patch.object(cli.dispatch, "load_policy", return_value=policy or dispatch.load_policy(NOWHERE)), \
+                mock.patch("sys.stdin", io.StringIO(json.dumps(payload))), contextlib.redirect_stdout(buffer):
+            code = cli.main(["dispatch", *argv])
+        return code, json.loads(buffer.getvalue())
+
+    def test_without_a_prompt_the_turn_is_the_newest_user_message(self):
+        code, out = self.run_stdin({"messages": [{"role": "user", "content": "Vat het dossier samen"}]},
+                                   "--privacy", "private")
+        self.assertEqual((code, out["privacy"], out["agent"]), (0, "highly_sensitive", "local"))
+
+    def test_privacy_on_the_command_line_only_ever_tightens(self):
+        strict = dispatch.load_policy(NOWHERE)
+        strict["profiles"] = {"default": "highly_sensitive"}
+        with mock.patch.object(cli.dispatch, "load_policy", return_value=strict), \
+                contextlib.redirect_stdout(io.StringIO()) as buffer:
+            cli.main(["dispatch", "--prompt", "Leg uit wat een bind mount is", "--privacy", "public"])
+        self.assertEqual(json.loads(buffer.getvalue())["privacy"], "highly_sensitive")
+
+    def test_input_that_is_not_an_object_is_an_error_answer(self):
+        code, out = self.run_stdin([1, 2])
+        self.assertEqual((code, out["error"]), (2, "invalid_request"))
+
+    def test_a_history_ending_in_a_reply_gets_the_prompt_as_its_new_turn(self):
+        pol = dispatch.load_policy(NOWHERE)
+        pol["profiles"] = {"default": "private"}
+        pol["agents"]["openai"]["enabled"] = True
+        frontier = {"type": "CHANGE", "exit": "ESCALATE", "signals": ["G8"], "niveau": "frontier",
+                    "privacy": "private", "context_tokens": 0, "repo_werk": False, "interactief": True,
+                    "reason": "hard work", "source": "jev"}
+        with mock.patch.object(cli.dispatch, "classify_with_jev", return_value=frontier):
+            code, out = self.run_stdin({"prompt": "Find the race", "messages": [
+                {"role": "user", "content": "Kijk naar de scheduler"}, {"role": "assistant", "content": "Welke?"}]},
+                policy=pol)
+        self.assertEqual((out["agent"], out["would_send_chars"] > 0), ("openai", True))
+
+    # --- TurnTests ---
+    def test_shadow_honours_the_time_budget_as_live_does(self):
+        pol = live_policy(openai=ON)
+        pol["turn_budget"] = 10
+        out = self.turn(pol, run=False)
+        self.assertEqual((out["agent"], out["attempts"][-1]["error"]), ("local", "budget"))
+
+    def test_a_negative_agent_timeout_means_the_default(self):
+        pol = live_policy(openai={"enabled": True, "timeout": -1})
+        seen = []
+
+        def run(argv, stdin_text, timeout):
+            seen.append(timeout)
+            Path(argv[argv.index("--output-last-message") + 1]).write_text("ok", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        self.turn(pol, runners={"codex": run})
+        self.assertGreater(seen[0], 30)
+
+    def test_a_timeout_the_budget_caused_does_not_cool_the_seat(self):
+        pol = live_policy(openai=ON)
+        pol["turn_budget"] = 100
+
+        def slow(argv, stdin_text, timeout):
+            raise subprocess.TimeoutExpired("codex", timeout)
+
+        ticks = iter([0.0, 0.0, 0.0, 0.0])
+        self.turn(pol, runners={"codex": slow}, clock=lambda: next(ticks))
+        self.assertEqual(self.refused, [])
+```
+
+- [ ] **Step 2: Run them and watch them fail**
+
+Run: `python3 -m unittest tests.test_dispatch.CliTests tests.test_dispatch.TurnTests -v`
+Expected: failures on each new test. The input test errors with a traceback (`AttributeError`).
+
+- [ ] **Step 3: In `jevkit/dispatch.py`**
+
+Add near `PRIVACY`:
+
+```python
+_RANK = {"public": 0, "private": 1, "highly_sensitive": 2}
+
+
+def stricter(first: str, second: str) -> str:
+    """The stricter of two privacy classes. Anything unknown counts as highly sensitive."""
+    return PRIVACY[max(_RANK.get(first, 2), _RANK.get(second, 2))]
+```
+
+Add above `run_agent`:
+
+```python
+def _agent_limit(settings: Dict[str, Any]) -> float:
+    """An agent's own time limit: its `timeout`, or 600 s when that is missing, zero or negative."""
+    limit = float(_int(settings.get("timeout"), 600))
+    return limit if limit > 0 else 600.0
+```
+
+In `run_agent`, replace the two limit lines with `limit = _agent_limit(settings)` and `timeout = min(limit, timeout) if timeout is not None else limit`.
+
+In `dispatch_turn`, move the budget check *before* `if not run:`, and cap it:
+
+```python
+        remaining = min(budget, budget - (clock() - started))
+        if remaining < _BUDGET_FLOOR:
+            out["attempts"].append({"agent": chosen["agent"], "error": "budget",
+                                    "detail": "the turn's time budget is spent"})
+            break
+        if not run:
+            return {**out, **chosen, "would_send_chars": len(prompt)}
+```
+
+The timeout branch cools only when the agent itself ran out:
+
+```python
+            elif error.code == "timeout" and remaining >= _agent_limit(settings):
+```
+
+- [ ] **Step 4: In `jevkit/cli.py`, replace the body of `cmd_dispatch` after the `check` branch with:**
+
+```python
+    request = _stdin_json() if args.prompt is None else {"prompt": args.prompt}
+    if not isinstance(request, dict):
+        _out({"error": "invalid_request", "detail": "stdin must be one JSON object"})
+        return 2
+    messages = request.get("messages") if isinstance(request.get("messages"), list) else None
+    prompt = str(request.get("prompt") or "")
+    if not prompt and messages:
+        # No prompt: the turn is the newest user message, as it is in the chat.
+        prompt = next((dispatch.relay.text_of(m.get("content")) for m in reversed(messages)
+                       if isinstance(m, dict) and m.get("role") == "user"), "")
+    if not prompt.strip():
+        _out({"error": "invalid_request", "detail": "no prompt and no user message"})
+        return 2
+    if messages is None:
+        messages = [{"role": "user", "content": prompt}]
+    elif not isinstance(messages[-1], dict) or messages[-1].get("role") != "user":
+        messages = [*messages, {"role": "user", "content": prompt}]     # the prompt is the new turn
+    profile = args.profile or "default"
+    if args.privacy:
+        # --privacy can only make a profile stricter, never looser.
+        current = dispatch.privacy_class("", profile=profile, policy=policy)[0]
+        policy = {**policy, "profiles": {**(policy.get("profiles") or {}),
+                                         profile: dispatch.stricter(current, args.privacy)}}
+    return _out(dispatch.dispatch_turn(prompt, messages, profile=profile,
+                                       context_tokens=dispatch._int(request.get("context_tokens")),
+                                       interactive=not args.background, run=args.run, policy=policy))
+```
+
+- [ ] **Step 5: Run everything, then commit**
+
+Run: `env -u TYPESAFE_API_KEY -u OPENROUTER_API_KEY python3 -m unittest discover -s tests && python3 scripts/check_release.py`
+Expected: `OK` and `clean`, on python3 and 3.9.
+
+```bash
+git add jevkit/cli.py jevkit/dispatch.py tests/test_dispatch.py
+git commit -m "cli: a turn read as the chat reads it, privacy only tightened; the time budget holds everywhere"
+```
+
+---
+
 ### Task 11: The Hermes plugin
 
 **Files:**
