@@ -32,10 +32,34 @@ _QUOTA = re.compile(r"(?i)(usage limit|rate[ -]?limit|quota|too many requests|\b
 _AUTH = re.compile(r"(?i)(not logged in|please log ?in|log ?in required|unauthori[sz]ed|\b401\b|"
                    r"invalid api key|authentication)")
 
-CODEX_ARGV = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only",
+CODEX_ARGV = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--cd", "{workdir}",
               "--model", "{model}", "--output-last-message", "{output}", "-"]
 CLAUDE_ARGV = ["claude", "-p", "--output-format", "json", "--model", "{model}", "--max-turns", "{max_turns}",
-               "--permission-mode", "plan", "--resume", "{session}"]
+               "--permission-mode", "plan", "--disallowedTools", "{disallowed}", "--resume", "{session}"]
+# An answering agent needs none of these: no files, no shell, no web. It gets the handoff and answers.
+CLAUDE_DISALLOWED = "Bash,Read,Grep,Glob,Edit,Write,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task"
+
+# The environment a CLI gets: what it needs to run and find its own login, nothing else. An API
+# key in Hermes's environment would override the subscription login, and no agent needs Jev's.
+_ENV_KEEP = ("PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ", "TMPDIR", "SHELL",
+             "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_RUNTIME_DIR",
+             "CODEX_HOME", "CLAUDE_CONFIG_DIR", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy",
+             "http_proxy", "no_proxy", "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS")
+# A value that becomes its own argv item must never start like a flag.
+_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}")
+
+
+def agent_env() -> dict:
+    return {name: os.environ[name] for name in _ENV_KEEP if name in os.environ}
+
+
+def _check_model(model: str) -> str:
+    if model and not _MODEL_NAME.fullmatch(model):
+        raise AgentError("failed", "the configured model name is not usable")
+    return model
+
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 Runner = Callable[[Sequence[str], str, float], Any]   # (argv, stdin, timeout) -> CompletedProcess-like
@@ -72,24 +96,36 @@ def fill(template: Sequence[str], **values: Any) -> List[str]:
     return out
 
 
-def _run(argv: Sequence[str], stdin_text: str, timeout: float) -> Any:
-    return subprocess.run(list(argv), input=stdin_text, capture_output=True, text=True,
-                          timeout=timeout, check=False)
+def _run(argv: Sequence[str], stdin_text: str, timeout: float, cwd: Optional[str] = None) -> Any:
+    return subprocess.run(list(argv), input=stdin_text, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=timeout, check=False, cwd=cwd, env=agent_env())
 
 
-def _call(argv: Sequence[str], stdin_text: str, timeout: float, runner: Optional[Runner]) -> Any:
+def _call(argv: Sequence[str], stdin_text: str, timeout: float, runner: Optional[Runner],
+          workdir: Optional[str] = None) -> Any:
+    if not argv:
+        raise AgentError("failed", "the argument list is empty")
     try:
-        return (runner or _run)(argv, stdin_text, timeout)
+        if runner is not None:
+            return runner(argv, stdin_text, timeout)
+        return _run(argv, stdin_text, timeout, cwd=workdir)
     except FileNotFoundError:
         raise AgentError("missing", f"{argv[0]} is not installed or not on PATH") from None
+    except PermissionError:
+        raise AgentError("missing", f"{argv[0]} is not executable") from None
     except subprocess.TimeoutExpired:
         raise AgentError("timeout", f"{argv[0]} gave no answer within {timeout:.0f} s") from None
+    except (OSError, ValueError) as error:
+        raise AgentError("failed", f"{argv[0]} could not start ({type(error).__name__})") from None
 
 
 def _failure(tool: str, text: str, returncode: Any) -> AgentError:
-    code = "quota" if _QUOTA.search(text) else "auth" if _AUTH.search(text) else "failed"
-    last = next((line.strip() for line in reversed(text.strip().splitlines()) if line.strip()), "")
-    return AgentError(code, f"{tool} exit {returncode}: {last}")
+    """The failure's code, and in its detail only the fixed phrase that decided it: never output text."""
+    for code, pattern in (("quota", _QUOTA), ("auth", _AUTH)):
+        found = pattern.search(text)
+        if found:
+            return AgentError(code, f"{tool} exit {returncode}: {found.group(0).lower()}")
+    return AgentError("failed", f"{tool} exit {returncode}")
 
 
 def _codex_message(stdout: str) -> str:
@@ -98,7 +134,7 @@ def _codex_message(stdout: str) -> str:
     for line in (stdout or "").splitlines():
         try:
             event = json.loads(line)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             continue
         if not isinstance(event, dict):
             continue
@@ -115,12 +151,15 @@ def run_codex(prompt: str, *, model: str = "", timeout: float = 600.0, argv: Opt
               runner: Optional[Runner] = None) -> Result:
     """One `codex exec` run on the ChatGPT login Codex already holds. Read-only by default."""
     with tempfile.TemporaryDirectory(prefix="jev-codex-") as scratch:
+        workdir = os.path.join(scratch, "work")
+        os.mkdir(workdir)
         output = os.path.join(scratch, "answer.txt")
-        done = _call(fill(argv or CODEX_ARGV, model=model, output=output), prompt, timeout, runner)
+        done = _call(fill(argv or CODEX_ARGV, model=_check_model(model), output=output, workdir=workdir),
+                     prompt, timeout, runner, workdir)
         if done.returncode != 0:
             raise _failure("codex", f"{done.stdout or ''}\n{done.stderr or ''}", done.returncode)
         try:
-            text = Path(output).read_text(encoding="utf-8").strip()
+            text = Path(output).read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
             text = ""
     text = text or _codex_message(done.stdout)
@@ -135,11 +174,13 @@ def run_claude(prompt: str, *, model: str = "", session: str = "", max_turns: in
 
     Never `--bare`: that mode ignores the subscription login and needs an API key.
     """
-    done = _call(fill(argv or CLAUDE_ARGV, model=model, session=session, max_turns=max_turns),
-                 prompt, timeout, runner)
+    session = session if session and _SESSION_ID.fullmatch(session) else ""
+    with tempfile.TemporaryDirectory(prefix="jev-claude-") as workdir:
+        done = _call(fill(argv or CLAUDE_ARGV, model=_check_model(model), session=session, max_turns=max_turns,
+                          disallowed=CLAUDE_DISALLOWED), prompt, timeout, runner, workdir)
     try:
         data = json.loads(done.stdout or "")
-    except json.JSONDecodeError:
+    except (ValueError, RecursionError):
         data = None
     if done.returncode != 0 or not isinstance(data, dict) or data.get("is_error"):
         said = str(data.get("result") or "") if isinstance(data, dict) else ""
@@ -147,7 +188,8 @@ def run_claude(prompt: str, *, model: str = "", session: str = "", max_turns: in
     text = str(data.get("result") or "").strip()
     if not text:
         raise AgentError("failed", "claude finished without an answer")
-    return Result(text=text, model=model, session=str(data.get("session_id") or ""))
+    returned = str(data.get("session_id") or "")
+    return Result(text=text, model=model, session=returned if _SESSION_ID.fullmatch(returned) else "")
 
 
 def run_openrouter(prompt: str, *, model: str, timeout: float = 120.0,
@@ -158,6 +200,8 @@ def run_openrouter(prompt: str, *, model: str, timeout: float = 120.0,
     key = key or keystore.resolve("openrouter")
     if not key:
         raise AgentError("auth", "no OpenRouter key: run `jev setup-key --provider openrouter`")
+    if not key.isprintable() or any(char.isspace() for char in key):
+        raise AgentError("auth", "the stored OpenRouter key is malformed; store it again")
     body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
                "HTTP-Referer": "https://github.com/kerpopule/hermes-jev-skills", "X-Title": "Hermes Jev Skills"}
@@ -166,10 +210,12 @@ def run_openrouter(prompt: str, *, model: str, timeout: float = 120.0,
     except client.JevError as error:
         code = {"rate_limited": "quota", "credits_exhausted": "quota", "auth_failed": "auth"}.get(error.code, "failed")
         raise AgentError(code, f"openrouter {error.code}") from None
+    except (ValueError, OSError):
+        raise AgentError("failed", "openrouter request could not be sent") from None
     try:
         data = json.loads(raw)
         text = str(data["choices"][0]["message"]["content"] or "").strip()
-    except (ValueError, KeyError, IndexError, TypeError):
+    except (ValueError, KeyError, IndexError, TypeError, RecursionError):
         raise AgentError("failed", "openrouter replied without an answer") from None
     if not text:
         raise AgentError("failed", "openrouter replied with an empty answer")

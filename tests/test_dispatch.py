@@ -541,7 +541,7 @@ class TurnTests(unittest.TestCase):
         out = self.turn(pol, runners={"codex": self.runner("codex", error="You've hit your usage limit"),
                                       "claude": self.runner("claude")})
         self.assertEqual(out["agent"], "claude")
-        self.assertEqual(self.refused, [("openai", "quota", 1800.0)])
+        self.assertEqual(self.refused, [("dispatch:openai", "quota", 1800.0)])
         self.assertEqual(out["attempts"][0]["error"], "quota")
         self.assertEqual(out["session"], "s-9")
 
@@ -553,7 +553,7 @@ class TurnTests(unittest.TestCase):
 
         out = self.turn(pol, runners={"codex": slow})
         self.assertEqual((out["agent"], out["downgraded"]), ("local", True))
-        self.assertEqual(self.refused, [("openai", "timeout", 300.0)])
+        self.assertEqual(self.refused, [("dispatch:openai", "timeout", 300.0)])
 
     def test_the_time_budget_stops_the_next_attempt(self):
         pol = live_policy(openai=ON, claude={"enabled": True, "only_repo": False})
@@ -700,3 +700,33 @@ class SecretValueTests(unittest.TestCase):
         for text in ("06 1234 5678", "06-1234 5678", "+31 (0)6 12345678", "0612345678"):
             self.assertTrue(dispatch.privacy.has_contact_details(text), text)
             self.assertNotIn("5678", dispatch.privacy.redact(f"bel {text} morgen"), text)
+
+
+class IsolationOfCooldownsTests(unittest.TestCase):
+    def test_dispatch_cools_its_own_names_not_routings_rungs(self):
+        seen = []
+        pol = live_policy(openai=ON)
+
+        def fail(argv, stdin_text, timeout):
+            return subprocess.CompletedProcess(argv, 1, "", "usage limit")
+
+        dispatch.dispatch_turn("Find the race", CHAT, policy=pol, config=dispatch.route.load_config(NOWHERE),
+                               answers=HARD_GENERAL, runners={"codex": fail}, cooling=lambda name: seen.append(name) or 0.0,
+                               refuse=lambda name, reason, cooldown=0: seen.append(("refuse", name)))
+        self.assertIn(("refuse", "dispatch:openai"), seen)
+        self.assertTrue(all(isinstance(n, tuple) or n.startswith("dispatch:") for n in seen))
+
+    def test_an_adapter_bug_is_a_failed_attempt_not_a_lost_turn(self):
+        pol = live_policy(openai=ON)
+        with mock.patch.object(dispatch, "run_agent", side_effect=KeyError("bug")):
+            out = dispatch.dispatch_turn("Find the race", CHAT, policy=pol, config=dispatch.route.load_config(NOWHERE),
+                                         answers=HARD_GENERAL, cooling=NOT_COOLING, refuse=lambda *a, **k: None)
+        self.assertEqual((out["agent"], out["attempts"][0]["error"]), ("local", "failed"))
+
+    def test_the_default_budget_stays_under_hermes_idle_warning(self):
+        self.assertLess(dispatch.DEFAULT_POLICY["turn_budget"], 900)
+
+    def test_check_reports_the_mode_in_the_file_as_policy_mode(self):
+        report = dispatch.check_agents(policy(), which=lambda p: None, cooling=NOT_COOLING, has_key=lambda: False)
+        self.assertIn("policy_mode", report)
+        self.assertNotIn("mode", report)

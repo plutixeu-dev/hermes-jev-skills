@@ -178,3 +178,65 @@ class OpenRouterTests(unittest.TestCase):
     def test_a_reply_without_an_answer_is_a_failure(self):
         with self.assertRaises(agents.AgentError):
             agents.run_openrouter(PROMPT, model="m", key="k", transport=lambda *_: b'{"choices": []}')
+
+
+import os  # noqa: E402
+
+
+class IsolationTests(unittest.TestCase):
+    def test_a_cli_runs_in_an_empty_directory_with_a_minimal_environment(self):
+        seen = {}
+
+        def fake_run(argv, **kwargs):
+            seen.update(kwargs, argv=list(argv), listing=os.listdir(kwargs["cwd"]))
+            Path(argv[argv.index("--output-last-message") + 1]).write_text("ok", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        env = {"PATH": "/usr/bin", "HOME": "/tmp/h", "ANTHROPIC_API_KEY": "x1", "OPENAI_API_KEY": "x2",
+               "OPENROUTER_API_KEY": "x3", "TYPESAFE_API_KEY": "x4", "HERMES_HOME": "/tmp/hh"}
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(agents.subprocess, "run", fake_run):
+            agents.run_codex(PROMPT)
+        self.assertEqual(seen["listing"], [])
+        self.assertEqual(seen["argv"][seen["argv"].index("--cd") + 1], seen["cwd"])
+        self.assertEqual(set(seen["env"]), {"PATH", "HOME"})
+        self.assertEqual((seen["encoding"], seen["errors"]), ("utf-8", "replace"))
+
+    def test_claude_gets_no_file_shell_or_web_tools(self):
+        run = FakeRun(stdout=claude_json())
+        agents.run_claude(PROMPT, runner=run)
+        blocked = run.argv[run.argv.index("--disallowedTools") + 1]
+        for tool in ("Bash", "Read", "Grep", "Glob", "Edit", "Write", "WebFetch", "WebSearch"):
+            self.assertIn(tool, blocked.split(","))
+
+
+class ErrorHygieneTests(unittest.TestCase):
+    def test_every_way_a_cli_can_break_is_an_agent_error(self):
+        cases = [FakeRun(error=PermissionError("denied")), FakeRun(error=OSError("exec format error")),
+                 FakeRun(stdout="[" * 100000)]
+        for run in cases:
+            with self.assertRaises(agents.AgentError):
+                agents.run_claude(PROMPT, runner=run)
+        with self.assertRaises(agents.AgentError):
+            agents.run_codex(PROMPT, argv=["{model}"], runner=FakeRun())       # fills to nothing
+
+    def test_a_failure_never_carries_output_text(self):
+        leak = "Jan de Vries (dossier 4411) heeft een usage limit"
+        with self.assertRaises(agents.AgentError) as caught:
+            agents.run_codex(PROMPT, runner=FakeRun(returncode=1, stdout=leak))
+        self.assertEqual(caught.exception.code, "quota")
+        self.assertNotIn("Jan", str(caught.exception))
+        self.assertNotIn("4411", caught.exception.detail)
+
+    def test_a_malformed_key_is_refused_before_it_reaches_a_header(self):
+        with self.assertRaises(agents.AgentError) as caught:
+            agents.run_openrouter(PROMPT, model="m", key="or-abc\ndef", transport=lambda *_: b"{}")
+        self.assertEqual(caught.exception.code, "auth")
+        self.assertNotIn("abc", str(caught.exception))
+
+    def test_a_session_or_model_that_looks_like_a_flag_is_never_passed(self):
+        run = FakeRun(stdout=claude_json(session_id="--dangerous-flag"))
+        result = agents.run_claude(PROMPT, session="--dangerous-flag", runner=run)
+        self.assertNotIn("--dangerous-flag", run.argv)
+        self.assertEqual(result.session, "")
+        with self.assertRaises(agents.AgentError):
+            agents.run_codex(PROMPT, model="--yolo", runner=FakeRun(write="ok"))

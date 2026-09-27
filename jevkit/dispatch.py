@@ -171,7 +171,7 @@ DEFAULT_POLICY: Dict[str, Any] = {
                        "timeout": 120, "cooldown": 600, "context_tokens": 0},
     },
     "handoff": {"max_messages": 6, "max_chars": 12000},
-    "turn_budget": 900,                       # seconds one turn may spend on agents before this machine answers
+    "turn_budget": 600,                       # seconds one turn may spend on agents, under Hermes's 900 s idle warning
     "timeout_cooldown": 300,                  # an agent that timed out is skipped this long, not the full cooldown
     "skip_prefixes": ["[kanban]", "[SESSION HANDOFF"],
     "skip_platforms": ["cron"],
@@ -433,6 +433,12 @@ _COOL_ON = ("quota", "auth", "missing")
 _BUDGET_FLOOR = 30.0                          # below this many seconds left, no agent is started
 
 
+def _rung(name: str) -> str:
+    """Dispatch's cooldowns live in the shared ladder file under their own names, so a dispatch
+    timeout never cools routing's `claude` rung, and routing's refusals never shut dispatch out."""
+    return f"dispatch:{name}"
+
+
 def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Optional[str] = "default",
                   context_tokens: int = 0, interactive: bool = True, run: bool = True, session: str = "",
                   policy: Optional[Dict[str, Any]] = None, config: Optional[Dict[str, Any]] = None,
@@ -470,7 +476,7 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
                                 downgraded=triage.get("niveau") == "frontier")}
     failed: Dict[str, str] = {}
     for _ in range(len(policy.get("agents") or {}) + 1):
-        chosen = choose_route(triage, policy, cooling=lambda name: 1e9 if name in failed else cooling(name))
+        chosen = choose_route(triage, policy, cooling=lambda name: 1e9 if name in failed else cooling(_rung(name)))
         if chosen["agent"] == LOCAL:
             return {**out, **chosen, "downgraded": chosen["downgraded"] or bool(failed)}
         prompt = relay.build_handoff(messages, agent=chosen["agent"], request=text,
@@ -494,11 +500,15 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
             failed[chosen["agent"]] = error.code
             settings = (policy.get("agents") or {}).get(chosen["agent"]) or {}
             if error.code in _COOL_ON:
-                refuse(chosen["agent"], f"{error.code}: {error.detail}",
+                refuse(_rung(chosen["agent"]), f"{error.code}: {error.detail}",
                        cooldown=float(_int(settings.get("cooldown"), 1800)))
             elif error.code == "timeout":
-                refuse(chosen["agent"], f"{error.code}: {error.detail}",
+                refuse(_rung(chosen["agent"]), f"{error.code}: {error.detail}",
                        cooldown=float(_int(policy.get("timeout_cooldown"), 300)))
+            continue
+        except Exception as error:  # noqa: BLE001 - an adapter bug is a failed attempt, never a lost turn
+            out["attempts"].append({"agent": chosen["agent"], "error": "failed", "detail": type(error).__name__})
+            failed[chosen["agent"]] = "failed"
             continue
         model = result.model or chosen["model"]
         return {**out, **chosen, "model": model, "session": result.session,
@@ -523,6 +533,6 @@ def check_agents(policy: Dict[str, Any], *, which: Optional[Callable[[str], Opti
         available = bool(which(program)) if program else (has_key() if kind == "openrouter" else False)
         rows[name] = {"kind": kind, "enabled": bool(settings.get("enabled")), "model": settings.get("model") or "",
                       "privacy": settings.get("privacy") or [], "available": available,
-                      "cooling_s": round(cooling(name))}
-    return {"mode": policy.get("mode"), "profiles": policy.get("profiles") or {}, "agents": rows,
+                      "cooling_s": round(cooling(_rung(name)))}
+    return {"policy_mode": policy.get("mode"), "profiles": policy.get("profiles") or {}, "agents": rows,
             "policy_files": [str(path) for path in policy_paths()]}
