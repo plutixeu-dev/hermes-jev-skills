@@ -122,6 +122,16 @@ class MobileNumberFormTests(unittest.TestCase):
                 out = privacy.redact(f"bel {text} morgen")
                 self.assertFalse(any(char.isdigit() for char in out), out)
 
+    def test_a_date_on_the_sixth_with_a_time_is_not_a_phone_number(self):
+        """06.12.2024 12:30 has the digits of a mobile number, and is the sixth of December."""
+        for text in ("06.12.2024 12:30", "06-12-2024 12:30", "06.07.1999 08:15", "06-06-2025 09:00"):
+            with self.subTest(text=text):
+                self.assertFalse(privacy.has_contact_details(text))
+                self.assertEqual(privacy.redact(text), text)
+        for text in ("06.12.20.24.12", "06-12345678", "06 12 34 56 78"):
+            with self.subTest(text=text):
+                self.assertTrue(privacy.has_contact_details(text))
+
 
 class DutchWordTests(unittest.TestCase):
     def test_a_dutch_question_about_a_password_is_sensitive(self):

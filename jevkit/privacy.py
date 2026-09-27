@@ -41,8 +41,10 @@ _EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,
 _PHONE = re.compile(r"(?<!\d)(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)")
 # 06 1234 5678, 06-12345678, 06.12.34.56.78, (06) 12345678, +31 (0)6 12345678, 0031 6 ...: the
 # North American shape above misses them all.
+# The sixth of a month in 1900-2099, written 06.12.2024 or 06-12-2024, is a date, not a number.
 _NL_MOBILE = re.compile(
-    r"(?<![\d+])(?:\+31\s?(?:\(0\)\s?)?|0031\s?|\(0|0)6\)?(?:\s?[.-]\s?|\s)?(?:\d[\s.-]?){7}\d(?!\d)")
+    r"(?<![\d+])(?:\+31\s?(?:\(0\)\s?)?|0031\s?|\(0|0)6\)?(?![.-]\d{2}[.-](?:19|20)\d{2}(?!\d))"
+    r"(?:\s?[.-]\s?|\s)?(?:\d[\s.-]?){7}\d(?!\d)")
 # The keyword rules above only fire on a label. A bank alert or an order receipt carries
 # the card number with no trigger word anywhere near it, and "4111 1111 1111 1111" went
 # out verbatim. Luhn is what keeps this from eating order and reference numbers — the
