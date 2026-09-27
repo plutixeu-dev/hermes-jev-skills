@@ -3,35 +3,46 @@
 Two tools: ``redact`` masks things that look like secrets or contact details, and
 ``is_sensitive`` says "do not send this at all". Callers that get a True from
 ``is_sensitive`` must skip Jev and take their fail-open path.
+
+Every pattern here runs in linear time. A repetition is bounded, or it can only start where
+another start's run ends: 50 KB of `a-a-a-…` took 50 s when a pattern re-read the rest of the
+text from every word. tests/test_privacy_forms.py times each public check on such input.
 """
 from __future__ import annotations
 
 import re
 import unicodedata
-from typing import List
+from typing import Iterable, Iterator, List, Tuple
 
 _SECRET_WORDS = re.compile(
     r"(?i)(api[_ -]?key|access[_ -]?token|authorization\s*:|bearer\s+[a-z0-9._-]{8,}|password|passwd|"
+    r"wachtwoord|pincode|inlogcode|toegangscode|"
     r"client[_ -]?secret|session[_ -]?cookie|credit[_ -]?card|card[_ -]?number|"
-    r"\bcvv\b|\bssn\b|private[_ -]?key|BEGIN [A-Z ]*PRIVATE KEY)"
+    r"\bcvv\b|\bssn\b|private[_ -]?key|BEGIN [A-Z ]{0,40}PRIVATE KEY)"
 )
 # An env-var name is how a secret usually appears in agent output: AWS_SECRET_ACCESS_KEY,
 # STRIPE_SECRET, DB_PASSWORD, GITHUB_TOKEN. Matching only `secret_key` missed every one of
-# them, because the revealing word sits in the middle of the name, not at its end.
+# them, because the revealing word sits in the middle of the name, not at its end. The match
+# starts at that word, behind the rest of the name: a name of any length, read once.
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b[A-Z][A-Z0-9]*(?:[_-][A-Z0-9]+)*[_-]"
-    r"(?:SECRET|SECRET[_-]?\w*KEY|API[_-]?KEY|KEY|TOKEN|PASSWORD|PASSWD|CREDENTIALS?|AUTH)\b"
+    r"(?i)(?<=[A-Z0-9][_-])"
+    r"(?:SECRET|SECRET[_-]?\w{0,40}KEY|API[_-]?KEY|KEY|TOKEN|PASSWORD|PASSWD|CREDENTIALS?|AUTH)\b"
     r"\s*[:=]\s*\S*"
 )
 _SECRET_NAME = re.compile(r"(?i)\bsecret[_ -](?:access[_ -])?key\b|\bsecret[_ -]?key\b")
+# A JWT's first part ends where another `-eyJ` begins, so a run of them is read once, not once
+# for every `eyJ` in it.
 _TOKEN_SHAPES = re.compile(
     r"\b(sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|"
-    r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|apikey_[A-Za-z0-9_]{20,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})\b"
+    r"AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{30,}|apikey_[A-Za-z0-9_]{20,}|"
+    r"eyJ(?:(?!-eyJ)[A-Za-z0-9_-]){10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,})\b"
 )
-_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,}\b")
 _PHONE = re.compile(r"(?<!\d)(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)")
-# 06 1234 5678, 06-12345678, +31 (0)6 12345678, 0031 6 ...: the North American shape above misses them all.
-_NL_MOBILE = re.compile(r"(?<![\d+])(?:\+31\s?(?:\(0\)\s?)?|0031\s?|0)6[\s-]?(?:\d[\s-]?){7}\d(?!\d)")
+# 06 1234 5678, 06-12345678, 06.12.34.56.78, (06) 12345678, +31 (0)6 12345678, 0031 6 ...: the
+# North American shape above misses them all.
+_NL_MOBILE = re.compile(
+    r"(?<![\d+])(?:\+31\s?(?:\(0\)\s?)?|0031\s?|\(0|0)6\)?(?:\s?[.-]\s?|\s)?(?:\d[\s.-]?){7}\d(?!\d)")
 # The keyword rules above only fire on a label. A bank alert or an order receipt carries
 # the card number with no trigger word anywhere near it, and "4111 1111 1111 1111" went
 # out verbatim. Luhn is what keeps this from eating order and reference numbers — the
@@ -83,6 +94,19 @@ def _mask_credential(match: "re.Match[str]") -> str:
     return "[secret]" if mixed else run
 
 
+def _mask(text: str, spans: Iterable[Tuple[int, int]], placeholder: str) -> str:
+    """Each span becomes the placeholder; spans that overlap become one."""
+    pieces: List[str] = []
+    end = 0
+    for start, stop in sorted(spans):
+        if start >= end:
+            pieces += [text[end:start], placeholder]
+            end = stop
+        else:
+            end = max(end, stop)
+    return "".join(pieces) + text[end:]
+
+
 def normalize(text: str) -> str:
     """Fold look-alike and invisible characters so a gate cannot be dodged with Unicode."""
     folded = unicodedata.normalize("NFKC", text)
@@ -101,27 +125,56 @@ def is_sensitive(text: str) -> bool:
 #
 # After a password word, any value that is not an ordinary word counts, letters-only included:
 # "my password is sunshine" leaves no doubt. After a key or token word, or in NAME=value, a value
-# counts only when it does not look like code, because `cache_key = f(x)` is everyday code.
-_PASSWORD_LABEL = r"(?:password|passwd|passphrase|wachtwoord|pincode|pin)"
+# counts only when it does not look like code, because `cache_key = f(x)` is everyday code. Code
+# that only handles a password holds none: `password = getpass.getpass()`, `password=password`.
+# "bankwachtwoord" and "wifiwachtwoord" are password words too, and in "is set to X" or "is
+# veranderd in X" the value is still X.
+_PASSWORD_LABEL = r"(?:password|passwd|passphrase|\w*wachtwoord|inlogcode|toegangscode|pincode|pin|pw)"
 _KEY_LABEL = r"(?:secret|token|api[_ -]?key|access[_ -]?key|private[_ -]?key|client[_ -]?secret)"
+_PASSWORD_WORD = re.compile(r"(?i)\A" + _PASSWORD_LABEL + r"\Z")  # one label, read whole
 _LABELLED_VALUE = re.compile(                                       # JSON, YAML, PHP, prose
     r"(?i)[\"']?\b(" + _PASSWORD_LABEL + r"|" + _KEY_LABEL + r")\b[\"']?"
-    r"(?:\s*(?:=>|[:=])\s*|\s+(?:is|was|=|:)\s*:?\s*)[\"']?([^\s\"',;})]+)")
+    r"(?:\s*(?:=>|[:=])\s*|\s+(?:is|was|=|:)\s*(?::\s*)?)[\"']?([^\s\"',;})]+)")
 _PASSWORD_SENTENCE = re.compile(                                    # "wachtwoord van mijn bank is X"
-    r"(?i)\b" + _PASSWORD_LABEL + r"\b[^.\n?!]{0,40}?\b(?:is|was|luidt|=)\b\s*:?\s*[\"']?([^\s\"',;.!?)]+)")
-_NAMED_VALUE = re.compile(                                          # DB_PASS=, MYSQL_PWD=, pwd=
-    r"(?i)\b(?:[a-z0-9]+[_-])*(?:pass|pwd|passwd|password|secret|token|key|apikey|auth|credentials?)\b"
-    r"\s*[:=]\s*[\"']?([^\s\"',;}]+)")
-_URL_USERINFO = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^/\s:@]*:[^/\s@]+@")
-_AUTH_HEADER = re.compile(r"(?i)\b(?:proxy-)?authorization\s*:\s*[a-z]+\s+[A-Za-z0-9._~+/=-]{6,}")
-_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{12,}")
+    r"(?i)\b" + _PASSWORD_LABEL + r"\b[^.\n?!]{0,40}?\b(?:is|was|luidt|=)\b\s*(?::\s*)?"
+    r"(?:(?:now|nu|set|changed|reset|updated|veranderd|gewijzigd|aangepast)\s+(?:to|into|in|naar)\s+)?"
+    r"[\"']?([^\s\"',;.!?)]+)")
+# A name prefix is only one people give passwords: `bypass` and `compass` are not passwords. The
+# word starts a name or follows `_` or `-`, so it may end a name of any length, read once.
+_NAMED_VALUE = re.compile(                                          # DB_PASS=, PGPASSWORD=, "db_password":
+    r"(?i)(?:\b|(?<=[_-]))((?:db|pg|my|mysql|smtp|mail|redis|admin|root|user|wifi|ftp|ssh|sql|ldap|vpn)?"
+    r"pass(?:wd|word)?|pwd|secret|token|key|apikey|auth|credentials?)\b[\"']?"
+    r"\s*[:=]\s*[\"']?([^\s\"',;})]+)")
+_PASSWORD_NAME = re.compile(r"(?i)(?:pass(?:wd|word)?|pwd)$")
+_URL_USERINFO = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,31}://[^/\s:@]{0,256}:(?!\$)([^/\s@]{1,256})@")
+_AUTH_HEADER = re.compile(r"(?i)\b(?:proxy-)?authorization\s*:\s*[a-z]+\s+([A-Za-z0-9._~+/=-]{6,})")
+_BEARER_VALUE = re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{12,})")
+
+
+def _up_to_the_next(command: str) -> str:
+    """The rest of the line, up to where `command` starts again: no start re-reads another's part."""
+    return r"(?:(?!" + command + r")[^\n])*?"
+
+
+# Each alternative captures the value alone, so redact keeps the command and masks what it
+# carries. `$NAME`, quoted or not, names a variable rather than holding a value. mysql's `-P` is a
+# port, so its `-p` is matched case-sensitively.
 _CLI_SECRET = re.compile(
-    r"(?i)(?:--password[= ]\s*(?![-$])\S+"
-    r"|\bmysql\w*\b[^\n]*?\s-p(?![\s$])\S+"
-    r"|\bsshpass\s+-p\s*(?!\$)\S+"
-    r"|\bcurl\b[^\n]*?\s(?:-u|--user)\s+[^\s:]+:(?!\$)\S+)")
-_PRIVATE_KEY_BLOCK = re.compile(r"BEGIN [A-Z ]*PRIVATE KEY")
+    r"(?i)(?:--password[= ]\s*(?!-)(?![\"']?\$)(\S+)"
+    r"|\bmysql\w*\b" + _up_to_the_next(r"\bmysql") + r"\s(?-i:-p)(?!\s)(?![\"']?\$)(\S+)"
+    r"|\bsshpass\s+-p\s*(?![\"']?\$)(\S+)"
+    r"|\bcurl\b" + _up_to_the_next(r"\bcurl\b") + r"\s(?:-u|--user)\s+[^\s:]+:(?![\"']?\$)(\S+)"
+    r"|\bredis-cli\b" + _up_to_the_next(r"\bredis-cli\b") + r"\s-a\s+(?![\"']?\$)(\S+)"
+    r"|\bdocker\s+login\b" + _up_to_the_next(r"\bdocker\s+login\b")
+    + r"\s(?:-p|--password)\s+(?![\"']?\$)(\S+))")
+_PRIVATE_KEY_BLOCK = re.compile(r"BEGIN [A-Z ]{0,40}PRIVATE KEY")
 _CODE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:\(\))?")
+_CODE_VALUE = re.compile(r"[(\[{]|::|->|^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
+# A variable named for a password: `new_password`, `getpass`, `userPassword`. The letters in
+# front of the word are letters only, so "Welkom01pass" is still a password and not a name.
+# Anchored, like _PASSWORD_WORD: it reads one value whole and never searches a text.
+_PASSWORD_NAME_VALUE = re.compile(r"\A(?:\w*_)?[a-z]*(?:password|passwd|pass|pwd|wachtwoord)\Z")
+_TYPE_WORDS = {"string", "text", "bytes", "number", "integer", "bool", "boolean", "object", "varchar"}
 _NOT_A_VALUE = {
     "true", "false", "none", "null", "nil", "undefined", "required", "incorrect", "invalid", "missing", "expired",
     "wrong", "correct", "empty", "blank", "set", "unset", "reset", "changed", "hashed", "encrypted", "stored",
@@ -130,14 +183,18 @@ _NOT_A_VALUE = {
     "used", "needed", "checked", "validated", "rejected", "accepted", "ok", "okay", "fine", "leaked", "compromised",
     "secure", "insecure", "niet", "fout", "goed", "verkeerd", "leeg", "gewijzigd", "veranderd", "verlopen",
     "vergeten", "onjuist", "juist", "te", "nog", "ook", "het", "de", "een", "mijn", "jouw", "sterk", "zwak", "kort",
-    "lang", "opgeslagen", "versleuteld"}
+    "lang", "opgeslagen", "versleuteld", "kwijt", "geblokkeerd", "verplicht", "ongeldig", "onbekend",
+    "hoofdlettergevoelig", "locked", "mandatory", "optional", "case-sensitive"}
 
 
 def _value_like(value: str, strict: bool) -> bool:
     """Could this be the credential itself. `strict` after key and token words: not if it looks like code."""
     value = value.strip().strip("\"'")
-    if len(value) < 4 or value.lower() in _NOT_A_VALUE:
+    lowered = value.lower()
+    if len(value) < 4 or lowered in _NOT_A_VALUE or lowered in _TYPE_WORDS:
         return False
+    if _CODE_VALUE.search(value) or _PASSWORD_NAME_VALUE.fullmatch(lowered):
+        return False    # `password = getpass.getpass()`, `password=password`: code about a password
     if value.startswith(("$", "{{", "<", "%", "os.", "process.env", "env.", "config.", "settings.")):
         return False
     if not strict:
@@ -147,18 +204,28 @@ def _value_like(value: str, strict: bool) -> bool:
     return not (_CODE_NAME.fullmatch(value) and not any(char.isdigit() for char in value))
 
 
+def _value_spans(probe: str) -> Iterator[Tuple[int, int]]:
+    """Where each credential value sits: what has_secret_value counts is what redact masks."""
+    for shape in (_BEARER_VALUE, _AUTH_HEADER, _URL_USERINFO, _CLI_SECRET):
+        for match in shape.finditer(probe):
+            yield match.span(match.lastindex)
+    for match in _LABELLED_VALUE.finditer(probe):
+        if _value_like(match.group(2), strict=not _PASSWORD_WORD.fullmatch(match.group(1))):
+            yield match.span(2)
+    for match in _PASSWORD_SENTENCE.finditer(probe):
+        if _value_like(match.group(1), strict=False):
+            yield match.span(1)
+    for match in _NAMED_VALUE.finditer(probe):              # a password-named value: as after a password word
+        if _value_like(match.group(2), strict=not _PASSWORD_NAME.search(match.group(1))):
+            yield match.span(2)
+
+
 def has_secret_value(text: str) -> bool:
     """A credential itself in the text, in any of the forms people and programs write one."""
     probe = normalize(text)
-    for shape in (_TOKEN_SHAPES, _PRIVATE_KEY_BLOCK, _BEARER_VALUE, _AUTH_HEADER, _URL_USERINFO, _CLI_SECRET):
-        if shape.search(probe):
-            return True
-    for match in _LABELLED_VALUE.finditer(probe):
-        if _value_like(match.group(2), strict=not re.fullmatch(r"(?i)" + _PASSWORD_LABEL, match.group(1))):
-            return True
-    if any(_value_like(match.group(1), strict=False) for match in _PASSWORD_SENTENCE.finditer(probe)):
+    if _TOKEN_SHAPES.search(probe) or _PRIVATE_KEY_BLOCK.search(probe):
         return True
-    if any(_value_like(match.group(1), strict=True) for match in _NAMED_VALUE.finditer(probe)):
+    if next(_value_spans(probe), None) is not None:
         return True
     return any(_mask_credential(match) == "[secret]" for match in _HIGH_ENTROPY.finditer(probe))
 
@@ -194,10 +261,33 @@ _IBAN_LENGTHS = {
     "SA": 24, "SC": 31, "SD": 18, "SE": 24, "SI": 19, "SK": 24, "SM": 27, "SO": 23, "ST": 25, "SV": 28,
     "TL": 23, "TN": 24, "TR": 26, "UA": 29, "VA": 22, "VG": 24, "XK": 20, "YE": 30,
 }
-# Written whole, or in groups of four split by one space or hyphen, and ending at a word
-# boundary: the next word never joins the number, which is what let "es2023 so that …" pass.
+# Written whole, or in groups of four split by up to two spaces, dots or hyphens, with or without
+# a space after the country, in any case, and ending at a word boundary: the next word never joins
+# the number, which is what let "es2023 so that …" pass.
 _IBAN_CANDIDATE = re.compile(
-    r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,3})?(?![A-Z0-9])")
+    r"(?i)(?<![A-Z0-9])[A-Z]{2} ?\d{2}(?:[ .-]{0,2}[A-Z0-9]{4}){2,7}(?:[ .-]{0,2}[A-Z0-9]{1,3})?(?![A-Z0-9])")
+
+
+def _iban_valid(candidate: str) -> bool:
+    compact = re.sub(r"[ .-]", "", candidate).upper()
+    if len(compact) != _IBAN_LENGTHS.get(compact[:2], -1) or not compact.isascii():
+        return False
+    return int("".join(str(int(char, 36)) for char in compact[4:] + compact[:4])) % 97 == 1
+
+
+def _iban_spans(text: str) -> Iterator[Tuple[int, int]]:
+    """Where each IBAN sits. A candidate that fails is tried again one character on, so a code in
+    front of an IBAN ("nr 12 NL91 …") cannot take its country code into a number that fails."""
+    position = 0
+    while True:
+        match = _IBAN_CANDIDATE.search(text, position)
+        if match is None:
+            return
+        if _iban_valid(match.group(0)):
+            yield match.span()
+            position = match.end()
+        else:
+            position = match.start() + 1
 
 
 def has_iban(text: str) -> bool:
@@ -206,13 +296,7 @@ def has_iban(text: str) -> bool:
     The check digits decide, as Luhn does for cards: a code that merely looks like an IBAN
     almost never passes mod 97.
     """
-    for match in _IBAN_CANDIDATE.finditer(normalize(text).upper()):
-        compact = re.sub(r"[ -]", "", match.group(0))
-        if len(compact) != _IBAN_LENGTHS.get(compact[:2], -1) or not compact.isascii():
-            continue
-        if int("".join(str(int(char, 36)) for char in compact[4:] + compact[:4])) % 97 == 1:
-            return True
-    return False
+    return next(_iban_spans(normalize(text)), None) is not None
 
 
 def redact(text: str, limit: int = 4000) -> str:
@@ -226,9 +310,14 @@ def redact(text: str, limit: int = 4000) -> str:
         return f"\x00TRK{len(held) - 1}\x00"
 
     out = _TRACKING.sub(_hold, out)
+    # An IBAN goes first and whole: after a label a value rule takes only its first group, and
+    # the card and phone rules below would each take a piece of the rest.
+    out = _mask(out, _iban_spans(out), "[iban]")
     out = _TOKEN_SHAPES.sub("[secret]", out)
     # Keep the variable's NAME (it is often the useful signal) and mask only its value.
     out = _SECRET_ASSIGNMENT.sub(lambda m: re.split(r"[:=]", m.group(0), maxsplit=1)[0].rstrip() + "=[secret]", out)
+    # Every value has_secret_value counts, in whatever form it was written: the label stays.
+    out = _mask(out, _value_spans(out), "[secret]")
     out = _LONG_HEX.sub("[hex]", out)
     # After [hex], so a digest stays a digest, and before the phone rules, so a spaced
     # card number is not shredded into a "phone" and a remainder.
