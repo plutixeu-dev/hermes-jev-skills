@@ -82,6 +82,13 @@ class PrivacyClassTests(unittest.TestCase):
         self.assertEqual(self.klass("Leg uit wat een bind mount is."), "public")
         self.assertEqual(self.klass("Leg uit wat een bind mount is.", profile="default"), "private")
 
+    def test_a_listed_profile_with_no_usable_class_is_the_strictest_not_the_default(self):
+        """A profile file saying `"secondbrain": null` must not fall back to a looser default."""
+        for broken in (None, "", 0, False, "geheim"):
+            policy = {**POLICY, "default_privacy": "public", "profiles": {"secondbrain": broken}}
+            with self.subTest(broken=broken):
+                self.assertEqual(self.klass("hoi", profile="secondbrain", policy=policy), "highly_sensitive")
+
     def test_a_secret_makes_any_turn_highly_sensitive(self):
         self.assertEqual(self.klass("mijn OPENAI_API_KEY=nietecht123"), "highly_sensitive")
 

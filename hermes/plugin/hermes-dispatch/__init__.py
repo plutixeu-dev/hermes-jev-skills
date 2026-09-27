@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -173,27 +174,48 @@ def _completion(text: str, model: str) -> Any:
                            created=int(time.time()), model=model, choices=[choice], usage=None)
 
 
-# Where the context Hermes injects into a turn begins: the recalled memory, then every plugin's.
-_INJECTED = "<memory-context>"
+# Where context injected into a turn begins, where it carries a mark: the recalled memory block,
+# and the context this repo's own plugins add (the handoff capsule, a skill suggestion).
+_INJECTED = re.compile(r"<memory-context>|\[Handoff from the previous session|\[Jev skill suggestion\]")
+_STORED_IMAGE = "[screenshot]"          # how the session store writes an image part
+_IMAGE_PARTS = ("image_url", "input_image", "image")
+
+
+def _cut(text: str) -> str:
+    found = _INJECTED.search(text)
+    return text[:found.start()].rstrip() if found else text
 
 
 def _said(content: Any) -> Any:
-    """One row's content without the context Hermes injected after it.
+    """One row's content without the context Hermes injected into it.
 
-    A turn made of parts keeps that context as a text part of its own (Hermes #71998), and read
-    back from the session store it is one text with the context inline. Everything from the
-    memory block on is cut. Plugin context sent without recalled memory has no mark to find.
+    A string row keeps that context in `api_content`, so its `content` is what was said. A turn
+    made of parts carries it inside `content`, as one more text part appended at the end (Hermes
+    #71998), and without recalled memory that part has no mark. So a turn of parts keeps nothing
+    after its first image, and without an image it leaves its last text part behind when it has
+    more than one. Read back from the store, such a turn is one text with an image line: nothing
+    after the first image line is kept. Marked context is cut wherever it appears.
     """
     if isinstance(content, str):
-        return content.split(_INJECTED, 1)[0].rstrip() if _INJECTED in content else content
+        if _STORED_IMAGE in content:
+            content = content[:content.index(_STORED_IMAGE) + len(_STORED_IMAGE)]
+        return _cut(content)
     if not isinstance(content, list):
         return content
+    parts = [part for part in content if isinstance(part, dict)]
+    image = next((i for i, part in enumerate(parts) if part.get("type") in _IMAGE_PARTS), None)
+    texts = [i for i, part in enumerate(parts) if part.get("type") == "text"]
+    if image is not None:
+        parts = parts[:image + 1]
+    elif len(texts) > 1:
+        parts = [part for i, part in enumerate(parts) if i != texts[-1]]
     kept = []
-    for part in content:
-        if isinstance(part, dict) and part.get("type") == "text" and _INJECTED in str(part.get("text") or ""):
-            part = {**part, "text": str(part.get("text")).split(_INJECTED, 1)[0].rstrip()}
-            if not part["text"]:
+    for part in parts:
+        if part.get("type") == "text":
+            text = _cut(str(part.get("text") or ""))
+            if not text:
                 continue
+            part = {**part, "text": text}
         kept.append(part)
     return kept
 
@@ -338,7 +360,7 @@ def _dispatch_command(raw_args: str = "") -> str:
         return _switch("notice", words[1])
     policy = dispatch.load_policy()
     report = dispatch.check_agents(policy)
-    klass = (policy.get("profiles") or {}).get(_profile()) or policy.get("default_privacy")
+    klass = dispatch.privacy_class("", profile=_profile(), policy=policy)[0]    # what a turn here really gets
     lines = [f"dispatch: {_setting('mode', policy, 'off')} · notice: {_setting('notice', policy, 'off')} · "
              f"profile {_profile()} is {klass}"]
     if not _middleware_available():

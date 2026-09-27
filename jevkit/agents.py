@@ -37,7 +37,9 @@ _AUTH = re.compile(r"(?i)(not logged in|please log ?in|log ?in required|unauthor
 CODEX_ARGV = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "read-only", "--cd", "{workdir}",
               "--model", "{model}", "--output-last-message", "{output}", "-"]
 # `--strict-mcp-config` with no `--mcp-config` loads no MCP server; `--tools ""` turns every built-in
-# tool off. `--disallowedTools` stays as the fallback for a CLI that does not know `--tools`.
+# tool off. A CLI too old to know `--tools` refuses the whole command, so the turn is answered
+# locally; its `agents.claude.argv` can leave `--tools ""` out, and `--disallowedTools` then still
+# closes the tools that matter.
 CLAUDE_ARGV = ["claude", "-p", "--output-format", "json", "--model", "{model}", "--max-turns", "{max_turns}",
                "--permission-mode", "plan", "--strict-mcp-config", "--tools", "",
                "--disallowedTools", "{disallowed}", "--resume", "{session}"]
@@ -222,6 +224,12 @@ def _claude_workdir() -> Optional[str]:
     return str(work)
 
 
+def _memory_above(path: str) -> bool:
+    """Is there a CLAUDE.md above `path`: Claude Code reads every one up to `/` and sends it along."""
+    return any((parent / name).exists() for parent in Path(path).parents
+               for name in ("CLAUDE.md", "CLAUDE.local.md"))
+
+
 def run_claude(prompt: str, *, model: str = "", session: str = "", max_turns: int = 8, timeout: float = 600.0,
                argv: Optional[Sequence[str]] = None, runner: Optional[Runner] = None) -> Result:
     """One `claude -p` run on the Claude Code login. Plan mode: it answers and edits nothing.
@@ -239,6 +247,8 @@ def run_claude(prompt: str, *, model: str = "", session: str = "", max_turns: in
         session = ""
     scratch = tempfile.TemporaryDirectory(prefix="jev-claude-", dir=str(_private_base())) if fresh else None
     with (scratch if scratch is not None else contextlib.nullcontext(workdir)) as cwd:
+        if runner is None and _memory_above(cwd):
+            raise AgentError("failed", "a CLAUDE.md above claude's directory would go along with the handoff")
         done = _call(fill(argv or CLAUDE_ARGV, model=model, session=session, max_turns=max_turns,
                           disallowed=CLAUDE_DISALLOWED), prompt, timeout, runner, cwd)
     try:

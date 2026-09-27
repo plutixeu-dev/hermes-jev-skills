@@ -391,6 +391,49 @@ class MiddlewareTests(unittest.TestCase):
         self.assertEqual(sent["messages"][0], {"role": "user", "content": "Wat staat hier?\n[screenshot]"})
         self.assertNotIn("Merel", json.dumps(sent["messages"]))
 
+    # Without recalled memory, the context Hermes adds to a turn made of parts has no mark at all:
+    # it is one more text part at the end (compose_multimodal_context_part, #71998), and stored, one
+    # more line after the image. hermes-handoff's capsule on an earlier photo turn went out this way.
+    CAPSULE = "Afspraak bij de huisarts is dinsdag"
+
+    def earlier_turn(self, content):
+        return self.history_turn([{"role": "user", "content": content}, {"role": "assistant", "content": "Mooi."},
+                                  {"role": "user", "content": "Find the race in the scheduler"}], [])
+
+    def test_the_unmarked_context_of_an_earlier_photo_turn_stays_behind(self):
+        self.mode("on")
+        image = {"type": "image_url", "image_url": {"url": "data:..."}}
+        for content in ([{"type": "text", "text": "Wat staat hier?"}, image, {"type": "text", "text": self.CAPSULE}],
+                        [image, {"type": "text", "text": self.CAPSULE}]):
+            with self.subTest(content=content):
+                sent = json.dumps(self.earlier_turn(content)["messages"])
+                self.assertNotIn("huisarts", sent)
+        self.assertIn("Wat staat hier?", json.dumps(self.dispatched[-2]["messages"]))
+
+    def test_a_stored_photo_turn_keeps_nothing_after_its_first_image(self):
+        self.mode("on")
+        sent = self.earlier_turn(f"Wat staat hier?\n[screenshot]\n{self.CAPSULE}")
+        self.assertEqual(sent["messages"][0], {"role": "user", "content": "Wat staat hier?\n[screenshot]"})
+
+    def test_a_turn_of_text_parts_leaves_its_last_part_behind(self):
+        """The context is always the last part Hermes adds; a lone text part is the person's own."""
+        self.mode("on")
+        sent = self.earlier_turn([{"type": "text", "text": "Kijk hier"}, {"type": "text", "text": self.CAPSULE}])
+        self.assertNotIn("huisarts", json.dumps(sent["messages"]))
+        self.assertIn("Kijk hier", json.dumps(sent["messages"]))
+        sent = self.earlier_turn([{"type": "text", "text": "Alleen dit"}])
+        self.assertIn("Alleen dit", json.dumps(sent["messages"]))
+
+    def test_the_wire_copy_is_cut_where_this_repos_plugins_begin(self):
+        self.mode("on")
+        wire = [{"role": "user", "content": "Kijk naar de scheduler\n\n[Handoff from the previous session — x]\n"
+                                            + self.CAPSULE},
+                {"role": "assistant", "content": "Welke?"}, {"role": "user", "content": "Find the race"}]
+        plugin._on_pre_llm_call(session_id="s9", turn_id="t1", user_message="Find the race")
+        plugin._on_llm_execution(request={"messages": wire}, next_call=Next(), session_id="s9", turn_id="t1",
+                                 api_mode="chat_completions")
+        self.assertNotIn("huisarts", json.dumps(self.dispatched[-1]["messages"]))
+
 
 class CommandTests(unittest.TestCase):
     def setUp(self):
@@ -429,6 +472,14 @@ class CommandTests(unittest.TestCase):
             text = plugin._dispatch_command("")
         self.assertIn("openai", text)
         self.assertIn("usage: /dispatch", text)
+
+    def test_status_shows_the_class_a_turn_really_gets(self):
+        policy = plugin.dispatch.load_policy(Path("/x"))
+        policy.update(default_privacy="public", profiles={"default": None})
+        with mock.patch.object(plugin.dispatch, "load_policy", return_value=policy), \
+                mock.patch.object(plugin.dispatch, "check_agents", return_value={"agents": {}}):
+            text = plugin._dispatch_command("")
+        self.assertIn("profile default is highly_sensitive", text)
 
     def test_status_names_a_settings_file_it_could_not_read(self):
         with open(Path(self.home.name) / "dispatch.json", "wb") as handle:

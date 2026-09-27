@@ -164,3 +164,57 @@ class LinearTimeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Task 13 read these as code and let them out; 04ac966 caught them. A quoted value, one written
+# after a word, an env-style NAME=value, and anything after a Dutch password word is a value as
+# written, never code: brackets, dots and a "pass" ending are part of the password.
+LITERAL_SECRETS = [
+    ('config.json: {"password": "Xk9(mQ2!vB"}', "Xk9(mQ2!vB"),
+    ("Mijn wachtwoord is Welkompass", "Welkompass"),
+    ("my password is rootpass", "rootpass"),
+    ("the password is letmein_pass", "letmein_pass"),
+    ('{"password": "testpass"}', "testpass"),
+    ("password = 'adminpwd'", "adminpwd"),
+    ('{"password": "Welkom.Thuis"}', "Welkom.Thuis"),
+    ("DB_PASSWORD=Xk9(mQ2!vB", "Xk9(mQ2!vB"),
+    ("wachtwoord: Zomer[2024]!", "Zomer[2024]"),
+    ("postgres://app:$uperS3cret@db:5432/app", "$uperS3cret"),
+    ("mysql -u root -p$uperS3cret", "$uperS3cret"),
+]
+
+# Variables, not values: an env-style $NAME or ${NAME} in a URL or on a command line.
+VARIABLES = [
+    "https://user:$GITLAB_TOKEN@gitlab.com/group/repo.git",
+    "mysql -u root -p$MYSQL_PWD",
+    "sshpass -p '$SSHPASS' ssh host",
+]
+
+
+class LiteralValueTests(unittest.TestCase):
+    def test_a_value_as_written_is_a_value_whatever_its_characters(self):
+        for text, value in LITERAL_SECRETS:
+            with self.subTest(text=text):
+                self.assertTrue(privacy.has_secret_value(text))
+                self.assertNotIn(value, privacy.redact(text))
+
+    def test_code_about_a_password_is_still_not_one(self):
+        for text in CODE_AND_QUESTIONS:
+            with self.subTest(text=text):
+                self.assertFalse(privacy.has_secret_value(text))
+
+    def test_an_env_style_variable_is_not_a_value(self):
+        for text in VARIABLES:
+            with self.subTest(text=text):
+                self.assertFalse(privacy.has_secret_value(text))
+
+    def test_the_known_limit_an_unquoted_dotted_value_after_an_english_label(self):
+        """`password: Welkom.Thuis` reads exactly like `password: typing.Optional`: it stays a miss.
+        Quoted, or after "is", the same value is caught (LITERAL_SECRETS)."""
+        self.assertFalse(privacy.has_secret_value("password: Welkom.Thuis"))
+
+
+class MobileLikeADateTests(unittest.TestCase):
+    def test_a_number_that_only_starts_like_a_date_is_still_a_number(self):
+        self.assertTrue(privacy.has_contact_details("bel 06-12-2034-56 morgen"))
+        self.assertFalse(privacy.has_contact_details("op 06-12-2024 om 12:30"))

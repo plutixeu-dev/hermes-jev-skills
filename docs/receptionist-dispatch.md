@@ -262,10 +262,14 @@ new session: isolation beats continuity.
 
 Where the directory lives matters because Claude Code reads every `CLAUDE.md` from its
 working directory up to `/`. Under your home it would read yours. Under /tmp it would read
-one that another user of the machine left there. The runtime directory avoids both.
+one that another user of the machine left there. The runtime directory avoids both, and if a
+`CLAUDE.md` or `CLAUDE.local.md` sits in any directory above claude's anyway, claude is not
+started for that turn: this machine answers.
 
 Claude runs with no tools at all (`--tools ""`) and no MCP servers (`--strict-mcp-config`).
-`--disallowedTools` stays as the fallback for a CLI without `--tools`.
+A CLI too old to know `--tools` refuses the whole command, and those turns are answered here.
+For such a CLI, set `agents.claude.argv` without `--tools ""`: `--disallowedTools` then still
+closes the tools that matter.
 
 Codex runs in its read-only sandbox, and the handoff asks it to read no files. Read-only is
 not no access. Codex can still read any file the Hermes user can read, `~/.hermes` included,

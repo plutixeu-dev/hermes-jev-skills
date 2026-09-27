@@ -140,7 +140,9 @@ def privacy_class(text: str, *, profile: Optional[str], policy: Dict[str, Any]) 
     profiles = policy.get("profiles") if isinstance(policy.get("profiles"), dict) else {}
     name = profile or "default"
     classified = profiles.get(name)
-    base = classified or policy.get("default_privacy") or "highly_sensitive"
+    # A listed profile keeps its own entry, even an empty or broken one: that is the strictest,
+    # never the default, which a later file saying `"secondbrain": null` would otherwise loosen to.
+    base = classified if name in profiles else (policy.get("default_privacy") or "highly_sensitive")
     if base not in PRIVACY:
         base = "highly_sensitive"
     probe = privacy.normalize(text or "")

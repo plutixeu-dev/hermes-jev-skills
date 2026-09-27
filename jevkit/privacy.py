@@ -43,7 +43,7 @@ _PHONE = re.compile(r"(?<!\d)(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{3}\)|\d{3})[\s.-]?\d{
 # North American shape above misses them all.
 # The sixth of a month in 1900-2099, written 06.12.2024 or 06-12-2024, is a date, not a number.
 _NL_MOBILE = re.compile(
-    r"(?<![\d+])(?:\+31\s?(?:\(0\)\s?)?|0031\s?|\(0|0)6\)?(?![.-]\d{2}[.-](?:19|20)\d{2}(?!\d))"
+    r"(?<![\d+])(?:\+31\s?(?:\(0\)\s?)?|0031\s?|\(0|0)6\)?(?![.-]\d{2}[.-](?:19|20)\d{2}(?![\d.-]))"
     r"(?:\s?[.-]\s?|\s)?(?:\d[\s.-]?){7}\d(?!\d)")
 # The keyword rules above only fire on a label. A bank alert or an order receipt carries
 # the card number with no trigger word anywhere near it, and "4111 1111 1111 1111" went
@@ -148,7 +148,10 @@ _NAMED_VALUE = re.compile(                                          # DB_PASS=, 
     r"pass(?:wd|word)?|pwd|secret|token|key|apikey|auth|credentials?)\b[\"']?"
     r"\s*[:=]\s*[\"']?([^\s\"',;})]+)")
 _PASSWORD_NAME = re.compile(r"(?i)(?:pass(?:wd|word)?|pwd)$")
-_URL_USERINFO = re.compile(r"(?i)\b[a-z][a-z0-9+.-]{0,31}://[^/\s:@]{0,256}:(?!\$)([^/\s@]{1,256})@")
+# `$NAME` or `${NAME}`, quoted or not, names a variable. `$uperS3cret` is a password that starts with $.
+_NOT_A_VARIABLE = r"(?![\"']?(?:\$\{|(?-i:\$[A-Z_][A-Z0-9_]*)(?![A-Za-z0-9_])))"
+_URL_USERINFO = re.compile(
+    r"(?i)\b[a-z][a-z0-9+.-]{0,31}://[^/\s:@]{0,256}:" + _NOT_A_VARIABLE + r"([^/\s@]{1,256})@")
 _AUTH_HEADER = re.compile(r"(?i)\b(?:proxy-)?authorization\s*:\s*[a-z]+\s+([A-Za-z0-9._~+/=-]{6,})")
 _BEARER_VALUE = re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{12,})")
 
@@ -162,13 +165,13 @@ def _up_to_the_next(command: str) -> str:
 # carries. `$NAME`, quoted or not, names a variable rather than holding a value. mysql's `-P` is a
 # port, so its `-p` is matched case-sensitively.
 _CLI_SECRET = re.compile(
-    r"(?i)(?:--password[= ]\s*(?!-)(?![\"']?\$)(\S+)"
-    r"|\bmysql\w*\b" + _up_to_the_next(r"\bmysql") + r"\s(?-i:-p)(?!\s)(?![\"']?\$)(\S+)"
-    r"|\bsshpass\s+-p\s*(?![\"']?\$)(\S+)"
-    r"|\bcurl\b" + _up_to_the_next(r"\bcurl\b") + r"\s(?:-u|--user)\s+[^\s:]+:(?![\"']?\$)(\S+)"
-    r"|\bredis-cli\b" + _up_to_the_next(r"\bredis-cli\b") + r"\s-a\s+(?![\"']?\$)(\S+)"
+    r"(?i)(?:--password[= ]\s*(?!-)" + _NOT_A_VARIABLE + r"(\S+)"
+    r"|\bmysql\w*\b" + _up_to_the_next(r"\bmysql") + r"\s(?-i:-p)(?!\s)" + _NOT_A_VARIABLE + r"(\S+)"
+    r"|\bsshpass\s+-p\s*" + _NOT_A_VARIABLE + r"(\S+)"
+    r"|\bcurl\b" + _up_to_the_next(r"\bcurl\b") + r"\s(?:-u|--user)\s+[^\s:]+:" + _NOT_A_VARIABLE + r"(\S+)"
+    r"|\bredis-cli\b" + _up_to_the_next(r"\bredis-cli\b") + r"\s-a\s+" + _NOT_A_VARIABLE + r"(\S+)"
     r"|\bdocker\s+login\b" + _up_to_the_next(r"\bdocker\s+login\b")
-    + r"\s(?:-p|--password)\s+(?![\"']?\$)(\S+))")
+    + r"\s(?:-p|--password)\s+" + _NOT_A_VARIABLE + r"(\S+))")
 _PRIVATE_KEY_BLOCK = re.compile(r"BEGIN [A-Z ]{0,40}PRIVATE KEY")
 _CODE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.]*(?:\(\))?")
 _CODE_VALUE = re.compile(r"[(\[{]|::|->|^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$")
@@ -189,15 +192,33 @@ _NOT_A_VALUE = {
     "hoofdlettergevoelig", "locked", "mandatory", "optional", "case-sensitive"}
 
 
-def _value_like(value: str, strict: bool) -> bool:
-    """Could this be the credential itself. `strict` after key and token words: not if it looks like code."""
+# A value written as a value: quoted, after a word ("is", "to"), in an env-style NAME=value, or
+# after a Dutch password word, which code does not use. Brackets, dots and a "pass" ending are
+# then part of the password (`"Xk9(mQ2!vB"`, `is rootpass`), not signs of code.
+_DUTCH_PASSWORD_WORD = re.compile(r"(?i)\A(?:\w*wachtwoord|inlogcode|toegangscode)\Z")
+_ENV_VARIABLE = re.compile(r"\$(?:\{[^}]*\}?|[A-Z_][A-Z0-9_]*)")
+
+
+def _literal(probe: str, start: int) -> bool:
+    """Is the value at `start` quoted, or written after a word rather than after `=`, `:` or `=>`."""
+    before = probe[max(0, start - 16):start].rstrip()
+    return before.endswith(("'", '"')) or not before.endswith(("=", ":", ">"))
+
+
+def _value_like(value: str, strict: bool, literal: bool = False) -> bool:
+    """Could this be the credential itself. `strict` after key and token words: not if it looks like code.
+
+    `literal`: the value was written as one, so looking like code does not make it code.
+    """
     value = value.strip().strip("\"'")
     lowered = value.lower()
     if len(value) < 4 or lowered in _NOT_A_VALUE or lowered in _TYPE_WORDS:
         return False
-    if _CODE_VALUE.search(value) or _PASSWORD_NAME_VALUE.fullmatch(lowered):
+    if not literal and (_CODE_VALUE.search(value) or _PASSWORD_NAME_VALUE.fullmatch(lowered)):
         return False    # `password = getpass.getpass()`, `password=password`: code about a password
-    if value.startswith(("$", "{{", "<", "%", "os.", "process.env", "env.", "config.", "settings.")):
+    if value.startswith("$") and (not literal or _ENV_VARIABLE.fullmatch(value)):
+        return False    # a variable; a quoted "$uperS3cret" is a password
+    if value.startswith(("{{", "<", "%", "os.", "process.env", "env.", "config.", "settings.")):
         return False
     if not strict:
         return True
@@ -212,13 +233,16 @@ def _value_spans(probe: str) -> Iterator[Tuple[int, int]]:
         for match in shape.finditer(probe):
             yield match.span(match.lastindex)
     for match in _LABELLED_VALUE.finditer(probe):
-        if _value_like(match.group(2), strict=not _PASSWORD_WORD.fullmatch(match.group(1))):
+        literal = _literal(probe, match.start(2)) or bool(_DUTCH_PASSWORD_WORD.fullmatch(match.group(1)))
+        if _value_like(match.group(2), strict=not _PASSWORD_WORD.fullmatch(match.group(1)), literal=literal):
             yield match.span(2)
     for match in _PASSWORD_SENTENCE.finditer(probe):
-        if _value_like(match.group(1), strict=False):
+        if _value_like(match.group(1), strict=False, literal=_literal(probe, match.start(1))):
             yield match.span(1)
     for match in _NAMED_VALUE.finditer(probe):              # a password-named value: as after a password word
-        if _value_like(match.group(2), strict=not _PASSWORD_NAME.search(match.group(1))):
+        env_style = match.group(1).isupper() and "=" in probe[match.end(1):match.start(2)]   # DB_PASSWORD=...
+        literal = env_style or _literal(probe, match.start(2))
+        if _value_like(match.group(2), strict=not _PASSWORD_NAME.search(match.group(1)), literal=literal):
             yield match.span(2)
 
 
