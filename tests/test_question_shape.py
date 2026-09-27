@@ -48,7 +48,7 @@ def setUpModule():
     unittest.addModuleCleanup(patcher.stop)
 
 
-KEY ="sk-test-key"
+KEY = "sk-test-key"
 
 
 def violations(questions: Mapping[str, Any]) -> List[str]:

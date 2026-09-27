@@ -40,7 +40,7 @@ def setUpModule():
     unittest.addModuleCleanup(patcher.stop)
 
 
-TURN ="count the lines of code in this repo and write the total into the changelog"
+TURN = "count the lines of code in this repo and write the total into the changelog"
 
 SKILLS = [
     {"name": "codebase-inspection", "description": "Count lines of code with pygount", "path": "skills/a/SKILL.md"},
