@@ -140,7 +140,7 @@ def privacy_class(text: str, *, profile: Optional[str], policy: Dict[str, Any]) 
         return "highly_sensitive", "holds a secret value"
     lowered = probe.lower()
     for term in DEFAULT_SENSITIVE_TERMS + _extra_terms(policy):
-        if _mentions(lowered, term):
+        if _mentions(lowered, privacy.normalize(term)):
             return "highly_sensitive", f"mentions {term}"
     if privacy.has_iban(probe):
         return "highly_sensitive", "holds an IBAN"
@@ -277,7 +277,7 @@ def _int(value: Any, default: int = 0) -> int:
     """A number from a hand-edited file. Anything that is not one counts as the default."""
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -293,8 +293,8 @@ def _skip(name: str, agent: Dict[str, Any], triage: Dict[str, Any], klass: str, 
         return "not configured"
     if not agent.get("enabled"):
         return "not enabled"
-    if last_resort and klass != "public":
-        return "the last resort takes public turns only"
+    if (last_resort or agent.get("kind") == "openrouter") and klass != "public":
+        return "OpenRouter and the last resort take public turns only"
     if klass not in (agent.get("privacy") or []):
         return f"not allowed for {klass} turns"
     if agent.get("only_repo") and not triage.get("repo_werk"):
@@ -354,7 +354,7 @@ _KIND_TO_TYPE = {"coding": "CHANGE", "writing": "CREATE", "research": "RESEARCH"
 def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], context_tokens: int = 0,
                       interactive: bool = True, config: Optional[Dict[str, Any]] = None,
                       transport: Optional[client.Transport] = None, timeout: float = 2.5,
-                      answers: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                      answers: Optional[Dict[str, Any]] = None, profile: Optional[str] = None) -> Dict[str, Any]:
     """One TRIAGE record from Jev's three routing answers, judged by the router's own rules.
 
     Jev is never asked about a highly sensitive turn. For a class not in `jev_text_for` Jev reads
@@ -362,7 +362,7 @@ def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], 
     or answering in a shape we cannot read: niveau `standard`, which the policy keeps here.
     """
     record: Dict[str, Any] = {"type": "EXPLAIN", "exit": "PROCEED", "signals": [], "niveau": "standard",
-                              "privacy": privacy_class, "context_tokens": max(0, int(context_tokens)),
+                              "privacy": privacy_class, "context_tokens": max(0, _int(context_tokens)),
                               "repo_werk": False, "interactief": bool(interactive)}
     if privacy_class not in PRIVACY or privacy_class == "highly_sensitive":
         return {**record, "privacy": "highly_sensitive", "source": "policy",
@@ -370,11 +370,15 @@ def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], 
     config = config or route.load_config()
     inner = route.unwrap(text, config)
     limit = int(config.get("ask_chars", 2500))
-    # A turn that looks like it holds a secret sends Jev features only, exactly as routing does,
-    # even when its class lets it leave as a question about secrets (privacy.has_secret_value).
-    features_only = privacy_class not in (policy.get("jev_text_for") or []) or privacy.is_sensitive(inner)
+    # Jev reads text only where routing would too: never for a private profile or routing set to
+    # features, and never for a turn that looks like it holds a secret (privacy.has_secret_value
+    # may still let a question about secrets leave, as text for an agent, not for Jev).
+    features_only = (privacy_class not in (policy.get("jev_text_for") or [])
+                     or privacy.is_sensitive(inner)
+                     or config.get("mode") == "features"
+                     or (profile or "default") in (config.get("private_profiles") or []))
     if answers is None:
-        state = route.state_for(route.clip_ask(inner, limit), context_tokens=context_tokens,
+        state = route.state_for(route.clip_ask(inner, limit), context_tokens=record["context_tokens"],
                                 private=features_only, limit=limit)
         try:
             answers = client.ask(state, route.questions(), timeout=timeout, transport=transport)["answers"]
@@ -382,8 +386,11 @@ def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], 
             return {**record, "source": "fail_open", "why": f"Jev unavailable ({error.code})"}
     if not all(isinstance(answers.get(name), dict) for name in ("difficulty", "kind", "costly_mistake")):
         return {**record, "source": "fail_open", "why": "routing answers incomplete"}
-    judged = route.judge_answers(answers, config, risky=route.is_risky(inner), features_only=features_only)
-    jev = {key: judged[key] for key in ("tier", "specialty", "confidence", "difficulty", "stakes")}
+    try:
+        judged = route.judge_answers(answers, config, risky=route.is_risky(inner), features_only=features_only)
+    except (KeyError, TypeError, ValueError):
+        return {**record, "source": "fail_open", "why": "routing answers incomplete"}
+    jev ={key: judged[key] for key in ("tier", "specialty", "confidence", "difficulty", "stakes")}
     if judged["tier"] is None:
         return {**record, "niveau": "tiny", "source": "jev", "why": judged["reason"], "jev": jev}
     niveau = (policy.get("tier_to_niveau") or {}).get(judged["tier"], "standard")
@@ -451,7 +458,8 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
     leaving = relay.leaving_text(messages, request=text, max_messages=max_messages)
     klass, why = privacy_class(leaving or text, profile=profile, policy=policy)
     triage = classify_with_jev(text, privacy_class=klass, policy=policy, context_tokens=context_tokens,
-                               interactive=interactive, config=config, transport=transport, answers=answers)
+                               interactive=interactive, config=config, transport=transport, answers=answers,
+                               profile=profile)
     out: Dict[str, Any] = {"privacy": klass, "privacy_why": why, "jev": triage.get("jev"),
                            "triage": {k: v for k, v in triage.items() if k != "jev"}, "attempts": []}
     if klass == "highly_sensitive":

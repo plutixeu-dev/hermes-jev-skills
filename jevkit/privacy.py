@@ -148,31 +148,36 @@ def has_contact_details(text: str) -> bool:
     return bool(_CONTACT_EMAIL.search(probe) or _CONTACT_PHONE.search(probe))
 
 
-# IBAN lengths per country, for the countries a Dutch household meets. The length is what keeps
-# the next word out of the number when an IBAN is written in groups of four.
-_IBAN_LENGTHS = {"AD": 24, "AT": 20, "BE": 16, "BG": 22, "CH": 21, "CY": 28, "CZ": 24, "DE": 22, "DK": 18,
-                 "EE": 20, "ES": 24, "FI": 18, "FR": 27, "GB": 22, "GI": 23, "GR": 27, "HR": 21, "HU": 28,
-                 "IE": 22, "IS": 26, "IT": 27, "LI": 21, "LT": 20, "LU": 20, "LV": 21, "MC": 27, "MT": 31,
-                 "NL": 18, "NO": 15, "PL": 28, "PT": 25, "RO": 24, "SE": 24, "SI": 19, "SK": 24, "SM": 27}
-_IBAN_START = re.compile(r"\b([A-Z]{2})(\d{2})")
+# The IBAN registry: country and length. A wrong or missing entry only means a miss for that
+# country: the check digits decide, so a longer table adds no false positives.
+_IBAN_LENGTHS = {
+    "AD": 24, "AE": 23, "AL": 28, "AT": 20, "AZ": 28, "BA": 20, "BE": 16, "BG": 22, "BH": 22, "BI": 27,
+    "BR": 29, "BY": 28, "CH": 21, "CR": 22, "CY": 28, "CZ": 24, "DE": 22, "DJ": 27, "DK": 18, "DO": 28,
+    "EE": 20, "EG": 29, "ES": 24, "FI": 18, "FK": 18, "FO": 18, "FR": 27, "GB": 22, "GE": 22, "GI": 23,
+    "GL": 18, "GR": 27, "GT": 28, "HR": 21, "HU": 28, "IE": 22, "IL": 23, "IQ": 23, "IS": 26, "IT": 27,
+    "JO": 30, "KW": 30, "KZ": 20, "LB": 28, "LC": 32, "LI": 21, "LT": 20, "LU": 20, "LV": 21, "LY": 25,
+    "MC": 27, "MD": 24, "ME": 22, "MK": 19, "MN": 20, "MR": 27, "MT": 31, "MU": 30, "NI": 28, "NL": 18,
+    "NO": 15, "OM": 23, "PK": 24, "PL": 28, "PS": 29, "PT": 25, "QA": 29, "RO": 24, "RS": 22, "RU": 33,
+    "SA": 24, "SC": 31, "SD": 18, "SE": 24, "SI": 19, "SK": 24, "SM": 27, "SO": 23, "ST": 25, "SV": 28,
+    "TL": 23, "TN": 24, "TR": 26, "UA": 29, "VA": 22, "VG": 24, "XK": 20, "YE": 30,
+}
+# Written whole, or in groups of four split by one space or hyphen, and ending at a word
+# boundary: the next word never joins the number, which is what let "es2023 so that …" pass.
+_IBAN_CANDIDATE = re.compile(
+    r"(?<![A-Z0-9])[A-Z]{2}\d{2}(?:[ -]?[A-Z0-9]{4}){2,7}(?:[ -]?[A-Z0-9]{1,3})?(?![A-Z0-9])")
 
 
 def has_iban(text: str) -> bool:
-    """An IBAN from one of those countries, grouped or not, in any case.
+    """An IBAN from the registry, grouped or not, in any case.
 
     The check digits decide, as Luhn does for cards: a code that merely looks like an IBAN
     almost never passes mod 97.
     """
-    probe = normalize(text).upper()
-    for match in _IBAN_START.finditer(probe):
-        length = _IBAN_LENGTHS.get(match.group(1))
-        if not length:
+    for match in _IBAN_CANDIDATE.finditer(normalize(text).upper()):
+        compact = re.sub(r"[ -]", "", match.group(0))
+        if len(compact) != _IBAN_LENGTHS.get(compact[:2], -1) or not compact.isascii():
             continue
-        compact = probe[match.start():match.start() + length + length // 4 + 2].replace(" ", "")[:length]
-        if len(compact) != length or not (compact.isascii() and compact.isalnum()):
-            continue
-        rearranged = compact[4:] + compact[:4]
-        if int("".join(str(int(char, 36)) for char in rearranged)) % 97 == 1:
+        if int("".join(str(int(char, 36)) for char in compact[4:] + compact[:4])) % 97 == 1:
             return True
     return False
 

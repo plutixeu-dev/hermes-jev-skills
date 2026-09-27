@@ -128,6 +128,20 @@ class PrivacyTermTests(unittest.TestCase):
         self.assertFalse(dispatch.privacy.has_iban("NL12 ABNA 0417 1643 00"))
         self.assertFalse(dispatch.privacy.has_iban("Libanon, AB12 CDEF, DE12 3456"))
 
+    def test_ibans_from_the_whole_registry(self):
+        for text in ("TR33 0006 1005 1978 6457 8413 26", "RS35 2600 0560 1001 6113 79",
+                     "UA21 3223 1300 0002 6007 2335 6600 1", "NL91-ABNA-0417-1643-00"):
+            self.assertTrue(dispatch.privacy.has_iban(text), text)
+
+    def test_a_version_string_followed_by_words_is_not_an_iban(self):
+        self.assertFalse(dispatch.privacy.has_iban(
+            "Set the target to es2023 so that optional chaining works in older browsers"))
+
+    def test_your_own_terms_are_normalised_like_the_text(self):
+        policy = {**POLICY, "sensitive_terms": ["reïntegratie"]}    # i + combining diaeresis
+        self.assertEqual(dispatch.privacy_class("Het reïntegratietraject loopt", profile="coding",
+                                                policy=policy)[0], "highly_sensitive")
+
 
 NOWHERE = Path("/nonexistent/dispatch.json")
 NOT_COOLING = lambda name: 0.0  # noqa: E731
@@ -205,6 +219,17 @@ class ChooseRouteTests(unittest.TestCase):
 
     def test_a_window_that_is_not_a_number_is_ignored(self):
         pol = policy(openai={"enabled": True, "context_tokens": "veel"})
+        self.assertEqual(self.route(triage(), pol)["agent"], "openai")
+
+    def test_openrouter_takes_public_turns_only_under_any_name(self):
+        pol = policy(openrouter={"enabled": True, "model": "x/y", "privacy": ["public", "private"]})
+        pol["last_resort"] = ""
+        pol["frontier_order"] = {"repo": ["openrouter"], "default": ["openrouter"]}
+        self.assertEqual(self.route(triage(privacy="private"), pol)["agent"], "local")
+        self.assertEqual(self.route(triage(privacy="public"), pol)["agent"], "openrouter")
+
+    def test_an_endless_window_is_no_window(self):
+        pol = policy(openai={"enabled": True, "context_tokens": float("inf")})
         self.assertEqual(self.route(triage(), pol)["agent"], "openai")
 
 
@@ -375,6 +400,25 @@ class ClassifyTests(unittest.TestCase):
         sent = json.dumps(wire.bodies)
         self.assertNotIn("rejected by the proxy", sent)
         self.assertIn("turn_features", sent)
+
+    def test_routing_set_to_features_only_is_honoured(self):
+        wire = Wire()
+        config = {**dispatch.route.load_config(NOWHERE), "mode": "features"}
+        self.classify(text="Rewrite the scheduler loop", transport=wire, config=config)
+        self.assertNotIn("Rewrite the scheduler loop", json.dumps(wire.bodies))
+
+    def test_a_private_profile_in_routing_sends_features(self):
+        wire = Wire()
+        config = {**dispatch.route.load_config(NOWHERE), "private_profiles": ["werk"]}
+        self.classify(text="Rewrite the scheduler loop", transport=wire, config=config, profile="werk")
+        self.assertNotIn("Rewrite the scheduler loop", json.dumps(wire.bodies))
+
+    def test_missing_inner_answers_fail_open(self):
+        record = self.classify(answers={"difficulty": {"score": 1}, "kind": {}, "costly_mistake": {}})
+        self.assertEqual((record["niveau"], record["source"]), ("standard", "fail_open"))
+
+    def test_no_token_count_is_zero(self):
+        self.assertEqual(self.classify(klass="highly_sensitive", context_tokens=None)["context_tokens"], 0)
 
 
 class JudgeAnswersTests(unittest.TestCase):
