@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence
 
+from . import client, keystore
+
 # Read on a failure path only: on success, an answer that talks about rate limits is an answer.
 _QUOTA = re.compile(r"(?i)(usage limit|rate[ -]?limit|quota|too many requests|\b429\b|limit reached|"
                     r"out of credits|insufficient credits)")
@@ -34,6 +36,7 @@ CODEX_ARGV = ["codex", "exec", "--json", "--skip-git-repo-check", "--sandbox", "
               "--model", "{model}", "--output-last-message", "{output}", "-"]
 CLAUDE_ARGV = ["claude", "-p", "--output-format", "json", "--model", "{model}", "--max-turns", "{max_turns}",
                "--permission-mode", "plan", "--resume", "{session}"]
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 Runner = Callable[[Sequence[str], str, float], Any]   # (argv, stdin, timeout) -> CompletedProcess-like
 
@@ -145,3 +148,29 @@ def run_claude(prompt: str, *, model: str = "", session: str = "", max_turns: in
     if not text:
         raise AgentError("failed", "claude finished without an answer")
     return Result(text=text, model=model, session=str(data.get("session_id") or ""))
+
+
+def run_openrouter(prompt: str, *, model: str, timeout: float = 120.0,
+                   transport: Optional[Callable[..., bytes]] = None, key: Optional[str] = None) -> Result:
+    """One chat completion on OpenRouter, with the key `jev setup-key --provider openrouter` stored."""
+    if not model:
+        raise AgentError("failed", "no OpenRouter model configured")
+    key = key or keystore.resolve("openrouter")
+    if not key:
+        raise AgentError("auth", "no OpenRouter key: run `jev setup-key --provider openrouter`")
+    body = json.dumps({"model": model, "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
+    headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+               "HTTP-Referer": "https://github.com/kerpopule/hermes-jev-skills", "X-Title": "Hermes Jev Skills"}
+    try:
+        raw = (transport or client.post)(OPENROUTER_URL, body, headers, timeout)
+    except client.JevError as error:
+        code = {"rate_limited": "quota", "credits_exhausted": "quota", "auth_failed": "auth"}.get(error.code, "failed")
+        raise AgentError(code, f"openrouter {error.code}") from None
+    try:
+        data = json.loads(raw)
+        text = str(data["choices"][0]["message"]["content"] or "").strip()
+    except (ValueError, KeyError, IndexError, TypeError):
+        raise AgentError("failed", "openrouter replied without an answer") from None
+    if not text:
+        raise AgentError("failed", "openrouter replied with an empty answer")
+    return Result(text=text, model=str(data.get("model") or model))

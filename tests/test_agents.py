@@ -137,3 +137,44 @@ class ClaudeTests(unittest.TestCase):
     def test_output_that_is_not_json_is_a_failure(self):
         with self.assertRaises(agents.AgentError):
             agents.run_claude(PROMPT, runner=FakeRun(stdout="Welcome to Claude Code"))
+
+
+class OpenRouterTests(unittest.TestCase):
+    def reply(self, text="Het antwoord.", model="vendor/model-1"):
+        return json.dumps({"model": model, "choices": [{"message": {"role": "assistant", "content": text}}]}).encode()
+
+    def test_one_chat_completion_with_the_given_key(self):
+        seen = {}
+
+        def transport(url, body, headers, timeout):
+            seen.update(url=url, body=json.loads(body), auth=headers["Authorization"])
+            return self.reply()
+
+        result = agents.run_openrouter(PROMPT, model="vendor/model-1", key="or-test", transport=transport)
+        self.assertEqual((result.text, result.model), ("Het antwoord.", "vendor/model-1"))
+        self.assertEqual(seen["url"], agents.OPENROUTER_URL)
+        self.assertEqual(seen["auth"], "Bearer or-test")
+        self.assertEqual(seen["body"]["messages"], [{"role": "user", "content": PROMPT}])
+
+    def test_429_is_quota(self):
+        def transport(*_):
+            raise client.JevError("rate_limited")
+        with self.assertRaises(agents.AgentError) as caught:
+            agents.run_openrouter(PROMPT, model="m", key="k", transport=transport)
+        self.assertEqual(caught.exception.code, "quota")
+
+    def test_no_key_is_auth_and_nothing_is_sent(self):
+        def transport(*_):
+            raise AssertionError("sent without a key")
+        with mock.patch.object(agents.keystore, "resolve", return_value=None):
+            with self.assertRaises(agents.AgentError) as caught:
+                agents.run_openrouter(PROMPT, model="m", transport=transport)
+        self.assertEqual(caught.exception.code, "auth")
+
+    def test_no_model_is_refused_before_anything_is_sent(self):
+        with self.assertRaises(agents.AgentError):
+            agents.run_openrouter(PROMPT, model="", key="k", transport=lambda *_: self.reply())
+
+    def test_a_reply_without_an_answer_is_a_failure(self):
+        with self.assertRaises(agents.AgentError):
+            agents.run_openrouter(PROMPT, model="m", key="k", transport=lambda *_: b'{"choices": []}')
