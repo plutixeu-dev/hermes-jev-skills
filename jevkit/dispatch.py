@@ -19,11 +19,13 @@ import json
 import os
 import re
 import shlex
+import shutil
+import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import catalog as catalog_mod
-from . import client, ladder, privacy, route
+from . import agents, client, keystore, ladder, privacy, relay, route
 
 TYPES = ("EXPLAIN", "CREATE", "CHANGE", "FIX", "DECIDE", "RESEARCH", "REVIEW", "TALK")
 EXITS = ("PROCEED", "ASSUME", "ASK", "ESCALATE")
@@ -392,3 +394,127 @@ def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], 
         record.update(exit="ESCALATE", signals=["G8"],
                       reason=f"Jev judged this {judged['tier']} {judged['specialty']} work")
     return record
+
+
+def run_agent(chosen: Dict[str, Any], prompt: str, *, policy: Dict[str, Any], session: str = "",
+              runners: Optional[Dict[str, Any]] = None, transport: Optional[Callable[..., bytes]] = None,
+              timeout: Optional[float] = None) -> agents.Result:
+    """Hand one prompt to the agent a route named, within its own time limit or `timeout` if shorter.
+
+    Raises agents.AgentError.
+    """
+    settings = (policy.get("agents") or {}).get(chosen["agent"]) or {}
+    kind, model = settings.get("kind"), str(settings.get("model") or "")
+    limit = float(_int(settings.get("timeout"), 600) or 600)
+    timeout = min(limit, timeout) if timeout else limit
+    runners = runners or {}
+    if kind == "codex":
+        return agents.run_codex(prompt, model=model, timeout=timeout, argv=settings.get("argv"),
+                                runner=runners.get("codex"))
+    if kind == "claude":
+        return agents.run_claude(prompt, model=model, session=session, max_turns=_int(settings.get("max_turns"), 8) or 8,
+                                 timeout=timeout, argv=settings.get("argv"), runner=runners.get("claude"))
+    if kind == "openrouter":
+        return agents.run_openrouter(prompt, model=model, timeout=timeout, transport=transport)
+    raise agents.AgentError("failed", f"unknown agent kind {kind!r}")
+
+
+# Failures that will not fix themselves by the next turn: cool the agent for its full cooldown,
+# so no lane retries it on every message. A timeout cools it briefly (`timeout_cooldown`), so the
+# next turn does not wait out the same slow seat again. An odd failure cools nothing.
+_COOL_ON = ("quota", "auth", "missing")
+_BUDGET_FLOOR = 30.0                          # below this many seconds left, no agent is started
+
+
+def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Optional[str] = "default",
+                  context_tokens: int = 0, interactive: bool = True, run: bool = True, session: str = "",
+                  policy: Optional[Dict[str, Any]] = None, config: Optional[Dict[str, Any]] = None,
+                  transport: Optional[client.Transport] = None,
+                  agent_transport: Optional[Callable[..., bytes]] = None,
+                  runners: Optional[Dict[str, Any]] = None, cooling: Optional[Callable[[str], float]] = None,
+                  refuse: Optional[Callable[..., Any]] = None, answers: Optional[Dict[str, Any]] = None,
+                  clock: Optional[Callable[[], float]] = None) -> Dict[str, Any]:
+    """One fresh user turn, start to finish. `agent` is "local" whenever this machine answers.
+
+    The privacy class is read over everything a handoff would carry (the request and the recent
+    history), not the newest message alone. With run=False (shadow) it decides and reports what
+    it would send, and hands nothing over. `turn_budget` bounds the time spent on agents.
+    """
+    policy = policy or load_policy()
+    cooling = cooling or ladder.cooling
+    refuse = refuse or ladder.refuse
+    clock = clock or time.monotonic
+    started = clock()
+    budget = float(_int(policy.get("turn_budget"), 900))
+    handoff = policy.get("handoff") or {}
+    max_messages = _int(handoff.get("max_messages"), 6)
+    leaving = relay.leaving_text(messages, request=text, max_messages=max_messages)
+    klass, why = privacy_class(leaving or text, profile=profile, policy=policy)
+    triage = classify_with_jev(text, privacy_class=klass, policy=policy, context_tokens=context_tokens,
+                               interactive=interactive, config=config, transport=transport, answers=answers)
+    out: Dict[str, Any] = {"privacy": klass, "privacy_why": why, "jev": triage.get("jev"),
+                           "triage": {k: v for k, v in triage.items() if k != "jev"}, "attempts": []}
+    if klass == "highly_sensitive":
+        # Said before the route is chosen, so the log names the real reason, not "standard work".
+        return {**out, **_local(f"highly sensitive ({why}): this machine answers", [])}
+    if relay.has_images(messages):
+        return {**out, **_local("the turn carries an image; a handed-off turn is text only for now", [],
+                                downgraded=triage.get("niveau") == "frontier")}
+    failed: Dict[str, str] = {}
+    for _ in range(len(policy.get("agents") or {}) + 1):
+        chosen = choose_route(triage, policy, cooling=lambda name: 1e9 if name in failed else cooling(name))
+        if chosen["agent"] == LOCAL:
+            return {**out, **chosen, "downgraded": chosen["downgraded"] or bool(failed)}
+        prompt = relay.build_handoff(messages, agent=chosen["agent"], request=text,
+                                     reason=str(triage.get("reason") or triage.get("why") or "frontier work"),
+                                     max_messages=max_messages, max_chars=_int(handoff.get("max_chars"), 12000))
+        if prompt is None:
+            return {**out, **_local("the conversation holds something that must not leave this machine",
+                                    chosen["considered"], downgraded=True)}
+        if not run:
+            return {**out, **chosen, "would_send_chars": len(prompt)}
+        remaining = budget - (clock() - started)
+        if remaining < _BUDGET_FLOOR:
+            out["attempts"].append({"agent": chosen["agent"], "error": "budget",
+                                    "detail": "the turn's time budget is spent"})
+            break
+        try:
+            result = run_agent(chosen, prompt, policy=policy, session=session, runners=runners,
+                               transport=agent_transport, timeout=remaining)
+        except agents.AgentError as error:
+            out["attempts"].append({"agent": chosen["agent"], "error": error.code, "detail": error.detail})
+            failed[chosen["agent"]] = error.code
+            settings = (policy.get("agents") or {}).get(chosen["agent"]) or {}
+            if error.code in _COOL_ON:
+                refuse(chosen["agent"], f"{error.code}: {error.detail}",
+                       cooldown=float(_int(settings.get("cooldown"), 1800)))
+            elif error.code == "timeout":
+                refuse(chosen["agent"], f"{error.code}: {error.detail}",
+                       cooldown=float(_int(policy.get("timeout_cooldown"), 300)))
+            continue
+        model = result.model or chosen["model"]
+        return {**out, **chosen, "model": model, "session": result.session,
+                "text": relay.relay(result.text, agent=chosen["agent"], model=model)}
+    return {**out, **_local("no agent answered in time, or every one that may take this turn failed; "
+                            "this machine answers", [], downgraded=True)}
+
+
+def check_agents(policy: Dict[str, Any], *, which: Optional[Callable[[str], Optional[str]]] = None,
+                 cooling: Optional[Callable[[str], float]] = None,
+                 has_key: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
+    """Per agent: on or off, its model, whether its program or key is here, and any cooldown. Runs nothing."""
+    which = which or shutil.which
+    cooling = cooling or ladder.cooling
+    has_key = has_key or (lambda: bool(keystore.resolve("openrouter")))
+    rows: Dict[str, Any] = {}
+    for name, settings in (policy.get("agents") or {}).items():
+        kind = settings.get("kind")
+        argv = settings.get("argv")
+        # The program that will actually run: a custom argument list names its own.
+        program = argv[0] if isinstance(argv, list) and argv else {"codex": "codex", "claude": "claude"}.get(str(kind))
+        available = bool(which(program)) if program else (has_key() if kind == "openrouter" else False)
+        rows[name] = {"kind": kind, "enabled": bool(settings.get("enabled")), "model": settings.get("model") or "",
+                      "privacy": settings.get("privacy") or [], "available": available,
+                      "cooling_s": round(cooling(name))}
+    return {"mode": policy.get("mode"), "profiles": policy.get("profiles") or {}, "agents": rows,
+            "policy_files": [str(path) for path in policy_paths()]}

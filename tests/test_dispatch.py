@@ -439,3 +439,159 @@ class ReviewFixTests(unittest.TestCase):
 
     def test_the_reason_says_when_a_profile_is_not_classified(self):
         self.assertIn("not classified", self.klass("hoi", profile="onbekend")[1])
+
+
+HARD_CODING = answers(p_hard=0.8, kind="coding")
+HARD_GENERAL = answers(p_hard=0.8, kind="general")
+CHAT = [{"role": "user", "content": "Find the race in the scheduler"}]
+
+
+def live_policy(**agents):
+    pol = policy(**agents)
+    pol["profiles"] = {"default": "private"}
+    return pol
+
+
+class TurnTests(unittest.TestCase):
+    def setUp(self):
+        self.refused = []
+        self.calls = []
+
+    def refuse(self, name, reason, cooldown=0):
+        self.refused.append((name, reason.split(":")[0], cooldown))
+
+    def runner(self, name, error=None, text="Antwoord."):
+        """A fake codex or claude: an answer, or a failure with `error` on stderr."""
+        def run(argv, stdin_text, timeout):
+            self.calls.append(name)
+            if error is not None:
+                return subprocess.CompletedProcess(argv, 1, "", error)
+            if name == "codex":
+                Path(argv[argv.index("--output-last-message") + 1]).write_text(text, encoding="utf-8")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+            body = json.dumps({"type": "result", "is_error": False, "result": text, "session_id": "s-9"})
+            return subprocess.CompletedProcess(argv, 0, body, "")
+        return run
+
+    def turn(self, pol, answers_=HARD_GENERAL, chat=CHAT, text=None, run=True, runners=None, clock=None):
+        return dispatch.dispatch_turn(text or chat[-1]["content"], chat, profile="default", run=run, policy=pol,
+                                      config=dispatch.route.load_config(NOWHERE), answers=answers_,
+                                      runners=runners or {}, cooling=NOT_COOLING, refuse=self.refuse,
+                                      clock=clock)
+
+    def test_shadow_decides_and_hands_nothing_over(self):
+        out = self.turn(live_policy(openai=ON), run=False, runners={"codex": self.runner("codex")})
+        self.assertEqual(out["agent"], "openai")
+        self.assertGreater(out["would_send_chars"], 0)
+        self.assertEqual(self.calls, [])
+        self.assertNotIn("text", out)
+
+    def test_an_answer_comes_back_named(self):
+        pol = live_policy(openai={"enabled": True, "model": "gpt-6-sol"})
+        out = self.turn(pol, runners={"codex": self.runner("codex", text="De race zit in de lock.")})
+        self.assertEqual(out["agent"], "openai")
+        self.assertEqual(out["text"], "[openai · gpt-6-sol]\n\nDe race zit in de lock.")
+
+    def test_a_full_seat_cools_and_the_next_agent_answers(self):
+        pol = live_policy(openai=ON, claude={"enabled": True, "only_repo": False, "cooldown": 900})
+        out = self.turn(pol, runners={"codex": self.runner("codex", error="You've hit your usage limit"),
+                                      "claude": self.runner("claude")})
+        self.assertEqual(out["agent"], "claude")
+        self.assertEqual(self.refused, [("openai", "quota", 1800.0)])
+        self.assertEqual(out["attempts"][0]["error"], "quota")
+        self.assertEqual(out["session"], "s-9")
+
+    def test_a_timeout_cools_the_seat_briefly(self):
+        pol = live_policy(openai=ON)
+
+        def slow(argv, stdin_text, timeout):
+            raise subprocess.TimeoutExpired("codex", timeout)
+
+        out = self.turn(pol, runners={"codex": slow})
+        self.assertEqual((out["agent"], out["downgraded"]), ("local", True))
+        self.assertEqual(self.refused, [("openai", "timeout", 300.0)])
+
+    def test_the_time_budget_stops_the_next_attempt(self):
+        pol = live_policy(openai=ON, claude={"enabled": True, "only_repo": False})
+        pol["turn_budget"] = 100
+        ticks = iter([0.0, 0.0, 95.0, 95.0, 95.0])        # start, before openai, before claude, spare
+        out = self.turn(pol, runners={"codex": self.runner("codex", error="usage limit"),
+                                      "claude": self.runner("claude")}, clock=lambda: next(ticks))
+        self.assertEqual(self.calls, ["codex"])
+        self.assertEqual((out["agent"], out["attempts"][-1]["error"]), ("local", "budget"))
+
+    def test_an_agent_gets_no_more_time_than_the_turn_has_left(self):
+        pol = live_policy(openai=ON)
+        pol["turn_budget"] = 100
+        seen = []
+
+        def run(argv, stdin_text, timeout):
+            seen.append(timeout)
+            Path(argv[argv.index("--output-last-message") + 1]).write_text("ok", encoding="utf-8")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        ticks = iter([0.0, 40.0, 40.0])
+        self.turn(pol, runners={"codex": run}, clock=lambda: next(ticks))
+        self.assertEqual(seen, [60.0])
+
+    def test_an_earlier_turn_about_a_client_file_keeps_the_turn_here(self):
+        chat = [{"role": "user", "content": "Hier is het dossier van mijn cliënt."},
+                {"role": "assistant", "content": "Ik heb het gelezen."},
+                {"role": "user", "content": "Find the race in the scheduler"}]
+        out = self.turn(live_policy(openai=ON), chat=chat, runners={"codex": self.runner("codex")})
+        self.assertEqual((out["agent"], out["privacy"]), ("local", "highly_sensitive"))
+        self.assertEqual(self.calls, [])
+
+    def test_every_agent_failing_answers_here(self):
+        pol = live_policy(openai=ON, claude={"enabled": True, "only_repo": False})
+        out = self.turn(pol, runners={"codex": self.runner("codex", error="usage limit"),
+                                      "claude": self.runner("claude", error="usage limit reached")})
+        self.assertEqual((out["agent"], out["downgraded"]), ("local", True))
+        self.assertEqual([a["agent"] for a in out["attempts"]], ["openai", "claude"])
+
+    def test_a_secret_in_the_conversation_keeps_the_turn_here(self):
+        chat = [{"role": "user", "content": "token: GITHUB_TOKEN=nietecht123"},
+                {"role": "assistant", "content": "Genoteerd."},
+                {"role": "user", "content": "Find the race in the scheduler"}]
+        out = self.turn(live_policy(openai=ON), chat=chat, runners={"codex": self.runner("codex")})
+        self.assertEqual(out["agent"], "local")
+        self.assertEqual(self.calls, [])
+
+    def test_highly_sensitive_asks_nobody(self):
+        chat = [{"role": "user", "content": "Vat het dossier van mijn cliënt samen"}]
+        out = self.turn(live_policy(openai=ON), chat=chat, answers_=None, runners={"codex": self.runner("codex")})
+        self.assertEqual((out["agent"], out["privacy"]), ("local", "highly_sensitive"))
+        self.assertIn("highly sensitive", out["reason"])
+        self.assertEqual(self.calls, [])
+
+    def test_a_bad_max_turns_does_not_crash_the_turn(self):
+        pol = live_policy(claude={"enabled": True, "only_repo": False})
+        pol["agents"]["claude"]["max_turns"] = "veel"
+        out = self.turn(pol, runners={"claude": self.runner("claude")})
+        self.assertEqual(out["agent"], "claude")
+
+    def test_an_image_stays_here_for_now(self):
+        chat = [{"role": "user", "content": [{"type": "text", "text": "Wat staat hier?"},
+                                             {"type": "image_url", "image_url": {"url": "data:..."}}]}]
+        out = self.turn(live_policy(openai=ON), chat=chat, text="Wat staat hier?", runners={"codex": self.runner("codex")})
+        self.assertEqual(out["agent"], "local")
+        self.assertEqual(self.calls, [])
+
+
+class CheckAgentsTests(unittest.TestCase):
+    def test_it_reports_without_running_anything(self):
+        pol = policy(openai={"enabled": True, "model": "gpt-6-sol"})
+        report = dispatch.check_agents(pol, which=lambda program: "/usr/bin/codex" if program == "codex" else None,
+                                       cooling=NOT_COOLING, has_key=lambda: False)
+        self.assertEqual(report["agents"]["openai"],
+                         {"kind": "codex", "enabled": True, "model": "gpt-6-sol", "privacy": ["public", "private"],
+                          "available": True, "cooling_s": 0})
+        self.assertFalse(report["agents"]["claude"]["available"])
+        self.assertFalse(report["agents"]["openrouter"]["available"])
+
+    def test_a_custom_argument_list_is_checked_by_its_own_program(self):
+        pol = policy(openai={"enabled": True, "argv": ["/opt/codex/bin/codex", "exec", "-"]})
+        seen = []
+        dispatch.check_agents(pol, which=lambda program: seen.append(program), cooling=NOT_COOLING,
+                              has_key=lambda: False)
+        self.assertIn("/opt/codex/bin/codex", seen)
