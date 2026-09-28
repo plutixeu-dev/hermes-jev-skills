@@ -889,6 +889,60 @@ class ProfileHomeTests(unittest.TestCase):
         self.assertEqual(paths[-2:], [root / "jev" / "dispatch.json", home / "jev" / "dispatch.json"])
 
 
+class ExplicitPolicyPathsTests(unittest.TestCase):
+    """policy_paths/load_policy/check_agents asked for one profile's view explicitly: what the
+    dashboard needs to show one profile among several, without touching the environment."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.xdg = Path(self.tmp.name) / "xdg"
+        patcher = mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.xdg)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        os.environ.pop("JEV_DISPATCH_POLICY", None)
+
+    def test_explicit_root_and_home_give_the_xdg_file_then_root_then_home(self):
+        root = Path(self.tmp.name) / "root"
+        home = root / "profiles" / "wiki"
+        root.mkdir()
+        home.mkdir(parents=True)
+        paths = dispatch.policy_paths(root=root, home=home)
+        self.assertEqual(paths, [self.xdg / "jev" / "dispatch.json", root / "jev" / "dispatch.json",
+                                 home / "jev" / "dispatch.json"])
+
+    def test_home_equal_to_root_gives_two_paths(self):
+        root = Path(self.tmp.name) / "root"
+        root.mkdir()
+        paths = dispatch.policy_paths(root=root, home=root)
+        self.assertEqual(paths, [self.xdg / "jev" / "dispatch.json", root / "jev" / "dispatch.json"])
+
+    def test_the_no_argument_behaviour_is_unchanged(self):
+        root = Path(self.tmp.name) / "root"
+        root.mkdir()
+        with mock.patch.dict(os.environ, {"HERMES_HOME": str(root)}):
+            no_args = dispatch.policy_paths()
+            explicit = dispatch.policy_paths(root=dispatch.catalog_mod.hermes_root(),
+                                             home=dispatch.catalog_mod.hermes_home())
+        self.assertEqual(no_args, [self.xdg / "jev" / "dispatch.json", root / "jev" / "dispatch.json"])
+        self.assertEqual(no_args, explicit)
+
+    def test_paths_layer_least_specific_first(self):
+        a = Path(self.tmp.name) / "a.json"
+        b = Path(self.tmp.name) / "b.json"
+        a.write_text(json.dumps({"agents": {"openai": {"enabled": True}}}))
+        b.write_text(json.dumps({"agents": {"openai": {"enabled": False}}}))
+        loaded = dispatch.load_policy(paths=[a, b])
+        self.assertIs(loaded["agents"]["openai"]["enabled"], False)
+
+    def test_check_agents_paths_lists_exactly_those(self):
+        x = Path(self.tmp.name) / "x.json"
+        pol = dispatch.load_policy(NOWHERE)
+        report = dispatch.check_agents(pol, which=lambda p: None, cooling=NOT_COOLING, has_key=lambda: False,
+                                       paths=[x])
+        self.assertEqual(report["policy_files"], [str(x)])
+
+
 class BrokenSettingsTests(unittest.TestCase):
     """A broken entry or file in a later layer turns agents off and privacy to the strictest."""
 

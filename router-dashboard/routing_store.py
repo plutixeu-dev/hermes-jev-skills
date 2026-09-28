@@ -499,6 +499,8 @@ def jev_live(hermes_home: str, since: float = 0.0, limit: int = 200) -> dict[str
 
     The hermes-jev plugin writes decisions only (tier, model, confidence, latency)
     to <profile home>/logs/jev-decisions.jsonl; prompt text is never in that file.
+    The same file also holds `kind: "dispatch"` rows from the hermes-dispatch plugin;
+    those belong to the dispatch panel (dispatch_store.live), not here.
     """
     events: list[dict[str, Any]] = []
     switches: dict[str, dict[str, str]] = {}
@@ -515,7 +517,7 @@ def jev_live(hermes_home: str, since: float = 0.0, limit: int = 200) -> dict[str
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, dict) and float(row.get("ts") or 0) > since:
+            if isinstance(row, dict) and row.get("kind") != "dispatch" and float(row.get("ts") or 0) > since:
                 row.setdefault("profile", name)
                 events.append(row)
     events.sort(key=lambda r: r.get("ts") or 0, reverse=True)

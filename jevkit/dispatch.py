@@ -191,13 +191,19 @@ DEFAULT_POLICY: Dict[str, Any] = {
 }
 
 
-def policy_paths() -> List[Path]:
-    """Least specific first, like routing.json: the shared file, then this profile's own."""
+def policy_paths(root: Optional[Path] = None, home: Optional[Path] = None) -> List[Path]:
+    """Least specific first, like routing.json: the shared file, then this profile's own.
+
+    `root`/`home` default to catalog_mod.hermes_root()/hermes_home(), as when called with no
+    arguments: a dashboard asking after one profile's view passes them explicitly instead of
+    relying on the environment. JEV_DISPATCH_POLICY still replaces everything, either way.
+    """
     override = os.environ.get("JEV_DISPATCH_POLICY")
     if override:
         return [Path(override)]
     paths = [Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "jev" / "dispatch.json"]
-    root, home = catalog_mod.hermes_root(), catalog_mod.hermes_home()
+    root = catalog_mod.hermes_root() if root is None else Path(root)
+    home = catalog_mod.hermes_home() if home is None else Path(home)
     if root.is_dir():
         paths.append(root / "jev" / "dispatch.json")
         if home != root:
@@ -256,16 +262,20 @@ def _turn_off(policy: Dict[str, Any], names: Sequence[str]) -> None:
         policy["agents"][name] = {**policy["agents"][name], **copy.deepcopy(_BROKEN_AGENT)}
 
 
-def load_policy(path: Optional[Path] = None) -> Dict[str, Any]:
+def load_policy(path: Optional[Path] = None, *, paths: Optional[Sequence[Path]] = None) -> Dict[str, Any]:
     """The defaults with each file laid over them. A missing file is skipped, never fatal.
 
     A file that is there but cannot be read (not UTF-8, not JSON, not an object) turns every agent
     off and privacy to the strictest, and is named in `broken_files`, so a typo never loosens what
     an earlier file set. A broken agent entry does that to its agent, a broken `agents` to all.
+
+    `paths`, when given, replaces the default search with exactly those files, layered least
+    specific first: one profile's view, asked for explicitly rather than read from the environment.
     """
     policy = copy.deepcopy(DEFAULT_POLICY)
     broken: List[str] = []
-    for candidate in ([path] if path else policy_paths()):
+    candidates = list(paths) if paths is not None else ([path] if path else policy_paths())
+    for candidate in candidates:
         try:
             layer = json.loads(Path(candidate).read_text(encoding="utf-8"))
         except (FileNotFoundError, NotADirectoryError):
@@ -572,8 +582,13 @@ def dispatch_turn(text: str, messages: Sequence[Dict[str, Any]], *, profile: Opt
 
 def check_agents(policy: Dict[str, Any], *, which: Optional[Callable[[str], Optional[str]]] = None,
                  cooling: Optional[Callable[[str], float]] = None,
-                 has_key: Optional[Callable[[], bool]] = None) -> Dict[str, Any]:
-    """Per agent: on or off, its model, whether its program or key is here, and any cooldown. Runs nothing."""
+                 has_key: Optional[Callable[[], bool]] = None,
+                 paths: Optional[Sequence[Path]] = None) -> Dict[str, Any]:
+    """Per agent: on or off, its model, whether its program or key is here, and any cooldown. Runs nothing.
+
+    `paths`, when given, is reported back as `policy_files` instead of the environment's own
+    `policy_paths()`: the files that this specific policy (perhaps one profile's) came from.
+    """
     which = which or shutil.which
     cooling = cooling or ladder.cooling
     has_key = has_key or (lambda: bool(keystore.resolve("openrouter")))
@@ -588,5 +603,5 @@ def check_agents(policy: Dict[str, Any], *, which: Optional[Callable[[str], Opti
                       "privacy": settings.get("privacy") or [], "available": available,
                       "cooling_s": round(cooling(_rung(name)))}
     return {"policy_mode": policy.get("mode"), "profiles": policy.get("profiles") or {}, "agents": rows,
-            "policy_files": [str(path) for path in policy_paths()],
+            "policy_files": [str(p) for p in (paths if paths is not None else policy_paths())],
             "broken_files": list(policy.get("broken_files") or [])}
