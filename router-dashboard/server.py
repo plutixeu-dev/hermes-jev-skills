@@ -169,8 +169,41 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json({"error": "not found"}, 404)
 
+    def _allowed_hosts(self) -> set[str]:
+        """The Host values that name this server: loopback on its port, and its bound address."""
+        bound_host, port = self.server.server_address[:2]
+        hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port, "[::1]:%d" % port}
+        hosts.add(("[%s]:%d" if ":" in bound_host else "%s:%d") % (bound_host, port))
+        return hosts
+
+    def _cross_site_refusal(self) -> Optional[tuple[int, str]]:
+        """Why this POST must be refused as possibly cross-site, or None.
+
+        With no token (the default loopback setup), any page the person visits could otherwise
+        POST here: a text/plain form needs no preflight, and a DNS-rebound name reaches
+        127.0.0.1 under its own Host. So: a JSON Content-Type (which a cross-site page cannot
+        send without a preflight this server never answers), an Origin, when sent, equal to
+        http://<Host>, and a Host that names this server. With a token the Host may be any
+        address the machine is reached by (a rebound page never has the token)."""
+        ctype = (self.headers.get("Content-Type") or "").strip().lower()
+        if not ctype.startswith("application/json"):
+            return 415, "POST bodies must be sent as application/json"
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host:
+            return 403, "missing Host header"
+        if not self.cfg.token and host not in self._allowed_hosts():
+            return 403, "Host %r does not name this dashboard" % host
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.strip().lower() != "http://" + host:
+            return 403, "cross-origin request refused"
+        return None
+
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        refusal = self._cross_site_refusal()
+        if refusal:
+            self._json({"error": refusal[1]}, refusal[0])
+            return
         if not self._authed(self.path):
             self._json({"error": "unauthorized"}, 401)
             return

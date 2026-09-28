@@ -1068,6 +1068,13 @@ function dispShowTest(name){
   out.className = "small " + (t.busy ? "muted" : t.ok ? "ok" : "fail");
   out.textContent = t.busy ? " testing…" : t.text ? " " + t.text : "";
   out.title = t.detail || "";
+  /* Also shown inline: a touch screen has no hover to reveal the title. */
+  if (!t.busy && t.detail){
+    const detail = document.createElement("span");
+    detail.id = "dispTestDetail-" + name; detail.className = "small muted";
+    detail.style.display = "block"; detail.textContent = t.detail;
+    out.appendChild(detail);
+  }
 }
 
 function renderDispOrder(){
@@ -1174,7 +1181,8 @@ function renderDispChecks(){
     line(off.length ? "no" : "ok", CURRENT === ALL
       ? "Enabled in " + (scope.length - off.length) + " of " + scope.length + " profiles" +
         (off.length ? " <span class='muted'>(not in " + esc(off.join(", ")) + ")</span>" : "")
-      : off.length ? "Not enabled in this profile's config.yaml" : "Enabled in this profile") +
+      : off.length ? "Not enabled in this profile's config.yaml <span class='muted'>(run <code>python3 install.py --enable " +
+        esc(CURRENT) + "</code> from the repo, then restart the gateway once)</span>" : "Enabled in this profile") +
     line(lx === true ? "ok" : lx === false ? "no" : "warn", "llm_execution: " + (lx === true ? "yes"
       : lx === false ? "no <span class='muted'>(dispatch cannot act here; update Hermes)</span>"
       : "unknown here, check <code>jev dispatch check</code>")) +

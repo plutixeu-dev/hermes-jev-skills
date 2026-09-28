@@ -109,6 +109,24 @@ class ServerTestCase(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(text in html, "the page does not say: %s" % text)
 
+    def test_a_test_result_shows_its_detail_inline_not_only_on_hover(self):
+        """M1: touch screens have no hover, so the error detail cannot live only in a title."""
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=10) as resp:
+            html = resp.read().decode()
+        body = html[html.find("function dispShowTest"):]
+        body = body[:body.find("\n}\n")]
+        self.assertTrue("dispTestDetail" in body, "dispShowTest does not write the detail into the page")
+        self.assertTrue("small muted" in body, "the inline detail is not small muted text")
+
+    def test_plugin_not_enabled_line_says_how_to_enable_it(self):
+        """M2: the check line names the command and the one restart."""
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=10) as resp:
+            html = resp.read().decode()
+        for text in ("Not enabled in this profile's config.yaml", "python3 install.py --enable ",
+                     "from the repo, then restart the gateway once"):
+            with self.subTest(text=text):
+                self.assertTrue(text in html, "the page does not say: %s" % text)
+
     def test_state_lists_profiles_and_use_cases(self):
         code, body = self.call("/api/state")
         self.assertEqual(code, 200)
@@ -504,6 +522,123 @@ class DispatchApiTestCase(unittest.TestCase):
                 code, body = self._post_raw(path, b"null")
                 self.assertEqual(code, 400)
                 self.assertIn("error", body)
+
+
+class CrossSiteTestCase(unittest.TestCase):
+    """I3: the default loopback setup has no token, so a page on another site (or a DNS-rebound
+    name) must not be able to change settings. Every POST needs a JSON Content-Type, an Origin
+    (when sent) equal to http://<Host>, and a Host that names this server."""
+
+    SWITCH = {"scope": "wiki", "switch": "mode", "value": "on"}
+    token = None
+    # DispatchApiTestCase's hermetic fixture, without re-running its tests here.
+    setUpClass = classmethod(DispatchApiTestCase.setUpClass.__func__)
+    tearDownClass = classmethod(DispatchApiTestCase.tearDownClass.__func__)
+
+    def raw(self, path, body, headers):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.putrequest("POST", path, skip_host=True, skip_accept_encoding=True)
+            data = json.dumps(body).encode()
+            sent = {"Host": "127.0.0.1:%d" % self.port, "Content-Length": str(len(data))}
+            sent.update(headers)
+            if self.token:
+                sent["X-Dashboard-Token"] = self.token
+            for name, value in sent.items():
+                if value is not None:
+                    conn.putheader(name, value)
+            conn.endheaders(data)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode() or "{}")
+        finally:
+            conn.close()
+
+    def mode(self):
+        return ds.state(self.home)["profiles"]["wiki"]["mode"]["value"]
+
+    def setUp(self):
+        ds.set_switch(self.home, "wiki", "mode", "off")
+
+    def test_a_text_plain_post_is_refused_with_415(self):
+        for path in ("/api/dispatch/switch", "/api/jev/switch", "/api/dispatch/apply", "/api/apply"):
+            for ctype in ("text/plain", "application/x-www-form-urlencoded", None):
+                with self.subTest(path=path, ctype=ctype):
+                    code, body = self.raw(path, dict(self.SWITCH, confirm=True), {"Content-Type": ctype})
+                    self.assertEqual(code, 415)
+                    self.assertIn("error", body)
+        self.assertEqual(self.mode(), "off")
+
+    def test_a_foreign_origin_is_refused_with_403(self):
+        for origin in ("https://evil.example", "http://127.0.0.1:1", "null",
+                       "https://127.0.0.1:%d" % self.port):
+            with self.subTest(origin=origin):
+                code, body = self.raw("/api/dispatch/switch", self.SWITCH,
+                                      {"Content-Type": "application/json", "Origin": origin})
+                self.assertEqual(code, 403)
+                self.assertIn("error", body)
+        self.assertEqual(self.mode(), "off")
+
+    def test_a_foreign_host_is_refused_with_403(self):
+        for host in ("evil.example:%d" % self.port, "evil.example", "127.0.0.1:1", None):
+            with self.subTest(host=host):
+                code, _ = self.raw("/api/dispatch/switch", self.SWITCH,
+                                   {"Content-Type": "application/json", "Host": host})
+                self.assertEqual(code, 403)
+        # a rebound name whose Origin matches its own Host is still refused
+        evil = "evil.example:%d" % self.port
+        code, _ = self.raw("/api/dispatch/switch", self.SWITCH,
+                           {"Content-Type": "application/json", "Host": evil, "Origin": "http://" + evil})
+        self.assertEqual(code, 403)
+        self.assertEqual(self.mode(), "off")
+
+    def test_a_same_origin_json_post_still_works(self):
+        for host in ("127.0.0.1:%d" % self.port, "localhost:%d" % self.port, "[::1]:%d" % self.port):
+            with self.subTest(host=host):
+                ds.set_switch(self.home, "wiki", "mode", "off")
+                code, body = self.raw("/api/dispatch/switch", self.SWITCH,
+                                      {"Content-Type": "application/json; charset=utf-8", "Host": host,
+                                       "Origin": "http://" + host})
+                self.assertEqual(code, 200, body)
+                self.assertEqual(self.mode(), "on")
+        ds.set_switch(self.home, "wiki", "mode", "off")
+        code, _ = self.raw("/api/dispatch/switch", self.SWITCH, {"Content-Type": "application/json"})
+        self.assertEqual(code, 200)          # no Origin at all: curl, scripts, the tests above
+
+
+class TokenHostTestCase(unittest.TestCase):
+    """With a token (required off loopback), the Host names whatever address people use to reach
+    the machine, so it is not held to the loopback list: the token already stops a rebound page,
+    which never has it. Origin must still match Host."""
+
+    def test_token_server_accepts_its_lan_host_but_not_a_foreign_origin(self):
+        import http.client
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with open(os.path.join(tmp.name, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(CFG)
+        httpd = srv.make_server("127.0.0.1", 0, srv.Config(tmp.name, "s3cret"))
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        def post(headers):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            try:
+                data = json.dumps({"profile": "default", "changes": {}}).encode()
+                conn.putrequest("POST", "/api/plan", skip_host=True, skip_accept_encoding=True)
+                for name, value in dict({"Content-Type": "application/json", "Content-Length": str(len(data)),
+                                         "X-Dashboard-Token": "s3cret"}, **headers).items():
+                    conn.putheader(name, value)
+                conn.endheaders(data)
+                return conn.getresponse().status
+            finally:
+                conn.close()
+
+        lan = "hermes-box.lan:%d" % port
+        self.assertEqual(post({"Host": lan, "Origin": "http://" + lan}), 200)
+        self.assertEqual(post({"Host": lan, "Origin": "https://evil.example"}), 403)
 
 
 class DispatchApiAuthTestCase(DispatchApiTestCase):
