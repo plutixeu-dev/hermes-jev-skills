@@ -340,3 +340,26 @@ class JevPoolTests(unittest.TestCase):
         self.log({"ts": 12, "kind": "route", "routed": False, "from": "openrouter:mid/one",
                   "reason": "low confidence 0.41"})
         self.assertNotIn("pool", rs.jev_live(self.home)["events"][0])
+
+
+class WriteModeTests(unittest.TestCase):
+    """A Hermes that runs as another user (Docker on a NAS) must still read what the dashboard saved."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_a_replaced_file_keeps_its_mode(self):
+        path = os.path.join(self.tmp.name, "config.yaml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("a: 1\n")
+        os.chmod(path, 0o644)
+        rs.write_atomic(path, "a: 2\n")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+
+    def test_a_new_file_gets_the_usual_mode(self):
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        path = os.path.join(self.tmp.name, "jev", "state.json")
+        rs.write_atomic(path, "{}")
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)

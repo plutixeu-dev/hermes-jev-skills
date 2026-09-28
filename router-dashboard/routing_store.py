@@ -91,6 +91,15 @@ def write_atomic(path: str, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(text)
+        # mkstemp makes the file 0600. Keep the mode the file had (or the umask's, for a new one),
+        # so a Hermes running as another user can still read what was saved.
+        try:
+            mode = os.stat(path).st_mode & 0o7777
+        except OSError:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         try:
