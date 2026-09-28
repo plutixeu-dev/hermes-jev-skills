@@ -77,6 +77,12 @@ class DispatchStoreTests(unittest.TestCase):
         which_patcher.start()
         self.addCleanup(which_patcher.stop)
 
+        # state() calls check_agents with its default has_key, which calls keystore.resolve():
+        # on macOS that would shell out to the real Keychain. Never real, whatever the machine.
+        keystore_patcher = mock.patch.object(dispatch.keystore, "resolve", return_value=None)
+        keystore_patcher.start()
+        self.addCleanup(keystore_patcher.stop)
+
     # -- fixture helpers ---------------------------------------------------
     def _profile_home(self, name):
         return self.home if name == "default" else os.path.join(self.home, "profiles", name)
@@ -198,6 +204,11 @@ class DispatchStoreTests(unittest.TestCase):
         self.assertTrue(out["openrouter_key"])
         self.assertTrue(out["agents"]["openrouter"]["available"])
 
+    def test_keystore_is_patched_so_state_never_queries_a_real_secret_store(self):
+        """Without this, state()'s default has_key would shell out to the real macOS Keychain."""
+        self.assertIsNone(dispatch.keystore.resolve("openrouter"))
+        self.assertFalse(ds.state(self.home)["openrouter_key"])
+
     # -- mode/notice sources: dashboard beats config.yaml beats dispatch.json -----
     def test_mode_source_climbs_from_dispatch_json_to_config_yaml_to_the_state_file(self):
         self.write_fleet({"mode": "shadow"})
@@ -221,6 +232,25 @@ class DispatchStoreTests(unittest.TestCase):
         self.write_config("default", enabled=["hermes-dispatch"], legacy={"hermes-dispatch": {"mode": "shadow"}})
         self.assertEqual(ds.state(self.home)["profiles"]["default"]["mode"],
                          {"value": "shadow", "source": "config.yaml"})
+
+    def test_mode_value_reflects_a_broken_later_layer_resetting_it(self):
+        """load_policy resets `mode` to "off" when a later layer cannot be read at all. The value
+        shown must match that reset, even if a label of "dispatch.json" is still fair (something
+        in that chain did try to set it)."""
+        self.write_fleet({"mode": "on"})
+        broken = os.path.join(self.home, "profiles", "wiki", "jev", "dispatch.json")
+        os.makedirs(os.path.dirname(broken), exist_ok=True)
+        Path(broken).write_text("{not json", encoding="utf-8")
+
+        wiki_paths = dispatch.policy_paths(root=Path(self.home), home=Path(self.home) / "profiles" / "wiki")
+        self.assertEqual(dispatch.load_policy(paths=wiki_paths)["mode"], "off")  # what the plugin itself would use
+        self.assertEqual(ds.state(self.home)["profiles"]["wiki"]["mode"]["value"], "off")
+
+    def test_a_null_mode_in_the_state_file_falls_through(self):
+        """{"mode": null} is not a value the dashboard set; it must fall through like a missing key,
+        the way the plugin's own `_setting` does (`value = ...get(name); if value is None: ...`)."""
+        self.write_state("default", {"mode": None})
+        self.assertEqual(ds.state(self.home)["profiles"]["default"]["mode"], {"value": "off", "source": "default"})
 
     def test_privacy_source_is_dispatch_json_only_when_the_profile_is_listed(self):
         self.write_fleet({"profiles": {"wiki": "public"}})
@@ -281,6 +311,18 @@ class DispatchStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ds.set_switch(self.home, "ghost", "mode", "on")
 
+    def test_set_switch_rejects_non_string_name_and_scope_instead_of_crashing(self):
+        with self.assertRaises(ValueError):
+            ds.set_switch(self.home, "default", ["mode"], "on")
+        with self.assertRaises(ValueError):
+            ds.set_switch(self.home, ["default"], "mode", "on")
+
+    def test_set_switch_bad_name_message_names_the_allowed_switches(self):
+        with self.assertRaises(ValueError) as cm:
+            ds.set_switch(self.home, "default", "bogus", "on")
+        self.assertIn("mode", str(cm.exception))
+        self.assertIn("notice", str(cm.exception))
+
     # -- plan / apply ------------------------------------------------------------
     def test_plan_writes_nothing(self):
         result = ds.plan(self.home, {"agents": {"claude": {"enabled": True, "model": "opus"}}})
@@ -295,6 +337,40 @@ class DispatchStoreTests(unittest.TestCase):
         self.write_fleet({"agents": {"claude": {"enabled": True}}})
         result = ds.plan(self.home, {"agents": {"claude": {"enabled": True}}})
         self.assertEqual(result["rows"], [])
+
+    def write_xdg_fleet(self, data):
+        """A dispatch.json at the shared, machine-wide XDG layer: the fleet file never mentions
+        these keys at all, but they are still part of what the dashboard shows as `state()`."""
+        path = os.path.join(self.home, "xdg", "jev", "dispatch.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        return path
+
+    def test_plan_agent_before_reflects_the_effective_root_view_not_just_the_fleet_file(self):
+        self.write_xdg_fleet({"agents": {"openai": {"enabled": True}}})
+        self.assertTrue(ds.state(self.home)["agents"]["openai"]["enabled"])  # what the dashboard already shows
+
+        result = ds.plan(self.home, {"agents": {"openai": {"enabled": False}}})
+        self.assertIn({"setting": "agents.openai.enabled", "before": True, "after": False}, result["rows"])
+
+        receipt = ds.apply(self.home, {"agents": {"openai": {"enabled": False}}})
+        self.assertEqual(receipt["changed"], 1)
+        self.assertFalse(ds.state(self.home)["agents"]["openai"]["enabled"])
+
+    def test_plan_profile_before_reflects_the_effective_root_view(self):
+        self.write_xdg_fleet({"profiles": {"wiki": "public"}})
+        # Asking for the value it already effectively has must be a no-op, not a spurious row.
+        self.assertEqual(ds.plan(self.home, {"profiles": {"wiki": "public"}})["rows"], [])
+        result = ds.plan(self.home, {"profiles": {"wiki": "private"}})
+        self.assertIn({"setting": "profiles.wiki", "before": "public", "after": "private"}, result["rows"])
+
+    def test_plan_order_before_reflects_the_effective_root_view(self):
+        self.write_xdg_fleet({"frontier_order": {"repo": ["openai", "claude"]}})
+        self.assertEqual(ds.plan(self.home, {"order": {"repo": ["openai", "claude"]}})["rows"], [])
+        result = ds.plan(self.home, {"order": {"repo": ["claude", "openai"]}})
+        self.assertIn({"setting": "frontier_order.repo", "before": ["openai", "claude"],
+                       "after": ["claude", "openai"]}, result["rows"])
 
     def test_apply_writes_backs_up_verifies_and_keeps_unknown_keys(self):
         path = self.write_fleet({"turn_budget": 111, "sensitive_terms": ["x"],
@@ -330,6 +406,7 @@ class DispatchStoreTests(unittest.TestCase):
             "model -x": {"agents": {"openai": {"model": "-x"}}},
             "enabled as a string": {"agents": {"openai": {"enabled": "true"}}},
             "order with a repeat": {"order": {"repo": ["claude", "claude"]}},
+            "order with an unhashable entry": {"order": {"repo": [["claude"], "openai"]}},
             "an unknown profile": {"profiles": {"ghost": "public"}},
             "only_repo on openai": {"agents": {"openai": {"only_repo": True}}},
         }
@@ -353,7 +430,13 @@ class DispatchStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             ds.apply(self.home, {"agents": {"claude": {"enabled": True}}})
         self.assertIn(path, str(cm.exception))
-        self.assertEqual(Path(path).read_text(encoding="utf-8"), "{not json")
+
+    def test_plan_tolerates_a_malformed_agent_entry_in_the_fleet_file(self):
+        """`{"agents": {"claude": true}}` is a shape load_policy already tolerates (as "off");
+        plan() must not crash trying to treat that value as a dict of settings."""
+        self.write_fleet({"agents": {"claude": True}})
+        result = ds.plan(self.home, {"agents": {"claude": {"enabled": True}}})
+        self.assertIn({"setting": "agents.claude.enabled", "before": False, "after": True}, result["rows"])
 
     def test_overridden_reports_a_profile_that_disagrees_with_the_fleet(self):
         wiki_path = self.write_profile_dispatch("wiki", {"agents": {"claude": {"enabled": False}}})

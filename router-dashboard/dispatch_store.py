@@ -83,18 +83,16 @@ def _plugin_enabled(config_path: Path, plugin: str) -> bool:
     return isinstance(enabled, list) and plugin in enabled
 
 
-def _scalar_from_files(paths: Sequence[Path], key: str) -> Optional[str]:
-    """The value the layered dispatch.json files set for a plain string key, most specific wins.
+def _mentioned_in_files(paths: Sequence[Path], key: str) -> bool:
+    """Does any of these dispatch.json layers set this key at all, whatever its type or whether
+    a later layer then resets it.
 
-    Used only to label WHERE mode/notice came from; the effective value the plugin actually
-    uses still comes from dispatch.load_policy.
+    Used only to label the source as "dispatch.json" instead of "default"; the VALUE shown is
+    never read from here. A raw file's own value can be the wrong one to show: a broken later
+    layer resets `mode` to "off" (jevkit.dispatch's `_BROKEN_TOP`), and a badly-typed value is
+    dropped the same way - both are decisions load_policy already made correctly.
     """
-    value = None
-    for path in paths:
-        candidate = _read_json(Path(path)).get(key)
-        if isinstance(candidate, str):
-            value = candidate
-    return value
+    return any(_read_json(Path(path)).get(key) is not None for path in paths)
 
 
 def _fleet_path(hermes_home: str) -> Path:
@@ -146,18 +144,24 @@ def _jev_routing_for(root: Path, home: Path, config_path: Path) -> str:
     return str(value or "off").lower()
 
 
-def _scoped_setting(state_path: Path, config_path: Path, paths: Sequence[Path], key: str) -> Dict[str, str]:
+def _scoped_setting(state_path: Path, config_path: Path, paths: Sequence[Path], key: str,
+                    policy: Dict[str, Any]) -> Dict[str, str]:
     """mode/notice's value and where it came from: the state file, config.yaml, dispatch.json
-    or the code's own default - in that order, matching hermes-dispatch's own `_setting`."""
+    or the code's own default - in that order, matching hermes-dispatch's own `_setting`.
+
+    The dispatch.json value comes from `policy` (the same effective policy `state()` already
+    loaded for this profile), never from re-reading the raw files: a later broken or badly-typed
+    layer can reset the key, and only load_policy knows that. The files are read only to decide
+    whether "dispatch.json" or "default" is the honest label for that already-computed value.
+    """
     state = _read_json(state_path)
-    if key in state:
+    if state.get(key) is not None:                    # {"mode": null} is not a value someone set
         return {"value": str(state[key]).lower(), "source": "dashboard"}
     cfg_value = _yaml_plugin_setting(config_path, "hermes-dispatch", key)
     if cfg_value is not None:
         return {"value": str(cfg_value).lower(), "source": "config.yaml"}
-    file_value = _scalar_from_files(paths, key)
-    if file_value is not None:
-        return {"value": file_value.lower(), "source": "dispatch.json"}
+    if _mentioned_in_files(paths, key):
+        return {"value": str(policy.get(key)).lower(), "source": "dispatch.json"}
     return {"value": "off", "source": "default"}
 
 
@@ -207,8 +211,8 @@ def state(hermes_home: str) -> Dict[str, Any]:
         jev_routing = _jev_routing_for(root, home_path, config_path)
         profiles[name] = {
             "home": str(home_path),
-            "mode": _scoped_setting(state_path, config_path, paths, "mode"),
-            "notice": _scoped_setting(state_path, config_path, paths, "notice"),
+            "mode": _scoped_setting(state_path, config_path, paths, "mode", policy),
+            "notice": _scoped_setting(state_path, config_path, paths, "notice", policy),
             "privacy": {"value": privacy_value, "source": "dispatch.json" if name in profiles_map else "default"},
             "jev_routing": jev_routing,
             "conflict": jev_routing in ("shadow", "on") and _plugin_enabled(config_path, "hermes-jev"),
@@ -235,8 +239,12 @@ def state(hermes_home: str) -> Dict[str, Any]:
 
 def set_switch(hermes_home: str, scope: str, name: str, value: str) -> Dict[str, Any]:
     """mode/notice for one profile, or `__all__` for every one of them, default included."""
-    if name not in SWITCHES or value not in SWITCHES[name]:
-        raise ValueError(f"{name} must be one of {SWITCHES.get(name)}")
+    if not isinstance(name, str) or name not in SWITCHES:
+        raise ValueError(f"{name!r} must be one of {tuple(SWITCHES)}")
+    if not isinstance(value, str) or value not in SWITCHES[name]:
+        raise ValueError(f"{value!r} must be one of {SWITCHES[name]}")
+    if not isinstance(scope, str):
+        raise ValueError("scope must be a profile name or '__all__'")
     homes = dict(routing_store._jev_homes(hermes_home))
     if scope != "__all__" and scope not in homes:
         raise ValueError(f"unknown profile: {scope!r}")
@@ -271,6 +279,10 @@ def plan(hermes_home: str, changes: Dict[str, Any]) -> Dict[str, Any]:
 
     path = _fleet_path(hermes_home)
     before = _read_fleet(path)                       # raises ValueError when the file is broken
+    root = Path(hermes_home)
+    # A value the fleet file itself never mentions can still be set by an earlier, shared layer
+    # (the XDG file); "before" must be what state() already shows, not the code's own default.
+    root_policy = dispatch.load_policy(paths=dispatch.policy_paths(root=root, home=root))
     known_profiles = {name for name, _ in routing_store._jev_homes(hermes_home)}
     after = copy.deepcopy(before)
     rows: List[Dict[str, Any]] = []
@@ -284,13 +296,14 @@ def plan(hermes_home: str, changes: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(spec, dict):
             raise ValueError("profiles must be an object")
         current = before.get("profiles") if isinstance(before.get("profiles"), dict) else {}
+        effective_profiles = root_policy.get("profiles") or {}
         updated = dict(current)
         for name, klass in spec.items():
             if name not in known_profiles:
                 raise ValueError(f"unknown profile: {name!r}")
             if klass not in dispatch.PRIVACY:
                 raise ValueError(f"profiles.{name} must be one of {dispatch.PRIVACY}")
-            note(f"profiles.{name}", current.get(name, ""), klass)
+            note(f"profiles.{name}", current.get(name, effective_profiles.get(name, "")), klass)
             updated[name] = klass
         after["profiles"] = updated
 
@@ -308,9 +321,12 @@ def plan(hermes_home: str, changes: Dict[str, Any]) -> Dict[str, Any]:
             bad = set(fields) - set(_AGENT_FIELDS)
             if bad:
                 raise ValueError(f"agents.{name}.{sorted(bad)[0]} is not a field the dashboard writes")
-            current = dict(current_agents.get(name) or {})
+            # A fleet value load_policy itself tolerates (e.g. `"claude": true`, treated as "off")
+            # is not a dict of settings; fall back to {} the same way load_policy falls back to "off".
+            raw_current = current_agents.get(name)
+            current = dict(raw_current) if isinstance(raw_current, dict) else {}
             updated = dict(current)
-            defaults = dispatch.DEFAULT_POLICY["agents"].get(name, {})
+            defaults = root_policy.get("agents", {}).get(name) or dispatch.DEFAULT_POLICY["agents"].get(name, {})
             if "enabled" in fields:
                 value = fields["enabled"]
                 if not isinstance(value, bool):
@@ -342,12 +358,16 @@ def plan(hermes_home: str, changes: Dict[str, Any]) -> Dict[str, Any]:
         if bad_kinds:
             raise ValueError(f"unknown order: {sorted(bad_kinds)[0]!r}")
         current_order = before.get("frontier_order") if isinstance(before.get("frontier_order"), dict) else {}
+        effective_order = root_policy.get("frontier_order") or {}
         updated_order = dict(current_order)
         for kind, sequence in spec.items():
-            if (not isinstance(sequence, list) or len(sequence) != len(FRONTIER)
-                    or set(sequence) != set(FRONTIER) or len(set(sequence)) != len(sequence)):
+            # The `all(isinstance(..., str))` check must run before `set(sequence)`: a sequence
+            # holding something unhashable (a list, a dict) would otherwise raise TypeError.
+            if (not isinstance(sequence, list) or not all(isinstance(item, str) for item in sequence)
+                    or len(sequence) != len(FRONTIER) or set(sequence) != set(FRONTIER)
+                    or len(set(sequence)) != len(sequence)):
                 raise ValueError(f"order.{kind} must list {list(FRONTIER)} once each")
-            default_order = list(dispatch.DEFAULT_POLICY["frontier_order"][kind])
+            default_order = list(effective_order.get(kind) or dispatch.DEFAULT_POLICY["frontier_order"][kind])
             note(f"frontier_order.{kind}", current_order.get(kind, default_order), sequence)
             updated_order[kind] = sequence
         after["frontier_order"] = updated_order
