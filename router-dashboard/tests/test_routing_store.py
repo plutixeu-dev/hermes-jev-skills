@@ -185,6 +185,99 @@ class JevSwitchTests(unittest.TestCase):
                     rs.set_jev_switch(tmp, scope, name, value)
 
 
+class JevSwitchDefaultScopeTests(unittest.TestCase):
+    """The root's jev/state.json is both the default profile's own switch and the shared value
+    every other profile inherits. Changing "default" must change the default profile only (I1)."""
+
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = self.tmp.name
+        for name in ("wiki", "alpha"):
+            os.makedirs(os.path.join(self.home, "profiles", name))
+
+    def own(self, name):
+        import json
+        path = os.path.join(self.home, "profiles", name, "jev", "state.json")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except OSError:
+            return None
+
+    def effective(self, state):
+        return {n: p["effective"]["routing"] for n, p in state["profiles"].items()}
+
+    def test_default_scope_changes_only_the_default_profile(self):
+        rs.set_jev_switch(self.home, "__all__", "routing", "on")
+        state = rs.set_jev_switch(self.home, "default", "routing", "off")
+        self.assertEqual(self.effective(state), {"default": "off", "wiki": "on", "alpha": "on"})
+        self.assertEqual(self.own("wiki"), {"routing": "on"})
+
+    def test_default_scope_keeps_a_profiles_own_value_and_its_other_keys(self):
+        import json
+        rs.set_jev_switch(self.home, "__all__", "routing", "shadow")
+        path = os.path.join(self.home, "profiles", "alpha", "jev", "state.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"routing": "on", "notice": "on"}, fh)
+        state = rs.set_jev_switch(self.home, "default", "routing", "off")
+        self.assertEqual(self.effective(state), {"default": "off", "wiki": "shadow", "alpha": "on"})
+        self.assertEqual(self.own("alpha"), {"routing": "on", "notice": "on"})
+        self.assertEqual(self.own("wiki"), {"routing": "shadow"})
+        # the other switches were not pinned: wiki still inherits notice/skills from the root
+        self.assertEqual(state["profiles"]["wiki"]["own"], {"routing": "shadow"})
+
+    def test_default_scope_with_nothing_set_pins_the_implicit_off(self):
+        state = rs.set_jev_switch(self.home, "default", "routing", "on")
+        self.assertEqual(self.effective(state), {"default": "on", "wiki": "off", "alpha": "off"})
+
+    def test_default_scope_keeps_a_profile_that_inherits_from_its_config_yaml(self):
+        """With no shared value, the plugin falls back to the profile's config.yaml; a new
+        shared value would hide that, so the profile's config value is pinned first."""
+        with open(os.path.join(self.home, "profiles", "wiki", "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("plugins:\n  entries:\n    hermes-jev:\n      settings:\n        routing: shadow\n")
+        state = rs.set_jev_switch(self.home, "default", "routing", "on")
+        self.assertEqual(self.own("wiki"), {"routing": "shadow"})
+        self.assertEqual(self.own("alpha"), {"routing": "off"})
+        self.assertEqual(state["profiles"]["default"]["effective"]["routing"], "on")
+
+    def test_all_scope_is_unchanged_after_a_default_change(self):
+        rs.set_jev_switch(self.home, "__all__", "routing", "on")
+        rs.set_jev_switch(self.home, "default", "routing", "off")
+        state = rs.set_jev_switch(self.home, "__all__", "routing", "shadow")
+        self.assertEqual(self.effective(state), {"default": "shadow", "wiki": "shadow", "alpha": "shadow"})
+        self.assertEqual(self.own("wiki"), {})
+
+    def test_concurrent_switch_writes_leave_valid_json(self):
+        import json
+        import threading
+        errors = []
+        barrier = threading.Barrier(20)
+
+        def work(i):
+            try:
+                barrier.wait()
+                if i % 2:
+                    rs.set_jev_switch(self.home, "wiki", "routing", ("off", "shadow", "on")[i % 3])
+                else:
+                    rs.set_jev_switch(self.home, "wiki", "notice", ("off", "on")[(i // 2) % 2])
+            except Exception as error:  # noqa: BLE001
+                errors.append(repr(error))
+
+        threads = [threading.Thread(target=work, args=(i,)) for i in range(20)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        path = os.path.join(self.home, "profiles", "wiki", "jev", "state.json")
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(set(json.load(fh)), {"routing", "notice"})
+        self.assertEqual(os.listdir(os.path.dirname(path)), ["state.json"])
+
+
 class JevPoolTests(unittest.TestCase):
     """The live view has to say which pool a model came from; the decision log records
     the decision, not the pool, so the dashboard resolves it against routing.json."""

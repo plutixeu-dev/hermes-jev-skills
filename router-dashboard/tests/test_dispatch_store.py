@@ -535,6 +535,82 @@ class DispatchStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ds.test_agent(self.home, "bogus")
 
+    # -- concurrency: ThreadingHTTPServer runs requests side by side (I2) ---------------
+    def test_concurrent_switch_writes_leave_valid_json_with_both_keys(self):
+        """20 threads alternately setting mode and notice on one profile: each write is a
+        read-modify-write, so without a lock and a unique temp file the file ends up invalid
+        JSON or missing a key."""
+        import threading
+        for _ in range(5):
+            errors = []
+            barrier = threading.Barrier(20)
+
+            def work(i):
+                try:
+                    barrier.wait()
+                    if i % 2:
+                        ds.set_switch(self.home, "wiki", "mode", ("off", "shadow", "on")[i % 3])
+                    else:
+                        ds.set_switch(self.home, "wiki", "notice", ("off", "on")[(i // 2) % 2])
+                except Exception as error:  # noqa: BLE001 - collected and reported below
+                    errors.append(repr(error))
+
+            threads = [threading.Thread(target=work, args=(i,)) for i in range(20)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+            path = os.path.join(self._profile_home("wiki"), "jev", "dispatch-state.json")
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            self.assertEqual(set(data), {"mode", "notice"})
+            leftovers = [n for n in os.listdir(os.path.dirname(path)) if n != "dispatch-state.json"]
+            self.assertEqual(leftovers, [])
+
+    def test_parallel_applies_keep_the_file_valid_and_each_backup_distinct(self):
+        import threading
+        self.write_fleet({"turn_budget": 7})
+        receipts, errors = [], []
+        barrier = threading.Barrier(10)
+
+        def work(i):
+            try:
+                barrier.wait()
+                receipts.append(ds.apply(self.home, {"agents": {"claude": {"model": "model-%d" % i}}}))
+            except Exception as error:  # noqa: BLE001
+                errors.append(repr(error))
+
+        threads = [threading.Thread(target=work, args=(i,)) for i in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(receipts), 10)
+        self.assertTrue(all(r["verified"] for r in receipts))
+        backups = [r["backup"] for r in receipts]
+        self.assertEqual(len(set(backups)), 10, "two applies shared one backup folder")
+        self.assertTrue(all(os.path.isfile(b) for b in backups))
+        after = json.loads(Path(self.home, "jev", "dispatch.json").read_text(encoding="utf-8"))
+        self.assertEqual(after["turn_budget"], 7)
+        self.assertRegex(after["agents"]["claude"]["model"], r"^model-\d$")
+        self.assertEqual(sorted(os.listdir(os.path.join(self.home, "jev"))), ["dispatch.json"])
+
+    # -- live: a malformed row is skipped, not a crash ----------------------------------
+    def test_live_skips_rows_with_a_non_numeric_ts_or_a_non_dict_triage(self):
+        self.log("default",
+                 {"ts": "yesterday", "kind": "dispatch", "agent": "openai"},
+                 {"ts": [1], "kind": "dispatch", "agent": "openai"},
+                 {"ts": True, "kind": "dispatch", "agent": "openai"},
+                 {"ts": 3, "kind": "dispatch", "agent": "openai", "triage": "frontier"},
+                 {"ts": 4, "kind": "dispatch", "agent": "openai", "triage": ["frontier"]},
+                 {"ts": 5, "kind": "dispatch", "agent": "claude", "triage": {"niveau": "frontier"}},
+                 {"ts": 6.5, "kind": "dispatch", "agent": "local"})
+        out = ds.live(self.home)
+        self.assertEqual([(e["ts"], e["agent"], e["niveau"]) for e in out["events"]],
+                         [(6.5, "local", None), (5, "claude", "frontier")])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

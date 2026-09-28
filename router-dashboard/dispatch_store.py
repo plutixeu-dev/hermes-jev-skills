@@ -255,14 +255,11 @@ def set_switch(hermes_home: str, scope: str, name: str, value: str) -> Dict[str,
         if data.get(name) == value:
             return
         data[name] = value
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".dashboard-tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
-        os.replace(tmp, path)
+        routing_store.write_atomic(path, json.dumps(data, indent=2))
 
-    for home in (homes.values() if scope == "__all__" else [homes[scope]]):
-        write(home)
+    with routing_store.WRITE_LOCK:             # one read-modify-write at a time, dashboard-wide
+        for home in (homes.values() if scope == "__all__" else [homes[scope]]):
+            write(home)
     return {"ok": True, "scope": scope, "switch": name, "value": value, **state(hermes_home)}
 
 
@@ -394,6 +391,11 @@ def _overrides(hermes_home: str, rows: Sequence[Dict[str, Any]]) -> List[Dict[st
 
 def apply(hermes_home: str, changes: Dict[str, Any], backup_root: Optional[str] = None) -> Dict[str, Any]:
     """Write `changes` to the fleet file, with a backup, a temp file + replace, and a read-back."""
+    with routing_store.WRITE_LOCK:             # plan, back up, write and read back as one step
+        return _apply_locked(hermes_home, changes, backup_root)
+
+
+def _apply_locked(hermes_home: str, changes: Dict[str, Any], backup_root: Optional[str]) -> Dict[str, Any]:
     path = _fleet_path(hermes_home)
     planned = plan(hermes_home, changes)               # raises ValueError for bad input or a broken file
     rows, text = planned["rows"], planned["text"]
@@ -403,16 +405,11 @@ def apply(hermes_home: str, changes: Dict[str, Any], backup_root: Optional[str] 
 
     backup = None
     if path.is_file():
-        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        bdir = Path(backup_root or os.path.join(hermes_home, "backups", _BACKUP_DIRNAME)) / stamp
-        bdir.mkdir(parents=True, exist_ok=True)
-        backup = str(bdir / path.name)
+        bdir = routing_store.backup_dir(backup_root or os.path.join(hermes_home, "backups", _BACKUP_DIRNAME))
+        backup = os.path.join(bdir, path.name)
         shutil.copy2(path, backup)
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".dashboard-tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    routing_store.write_atomic(str(path), text)
 
     after = json.loads(path.read_text(encoding="utf-8"))
     mismatches = []
@@ -446,11 +443,17 @@ def live(hermes_home: str, since: float = 0.0, limit: int = 100) -> Dict[str, An
                 continue
             if not isinstance(row, dict) or row.get("kind") != "dispatch":
                 continue
-            if float(row.get("ts") or 0) <= since:
+            ts, triage = row.get("ts"), row.get("triage")
+            # A hand-edited or foreign row is skipped, not allowed to break the whole feed.
+            if not isinstance(ts, (int, float)) or isinstance(ts, bool) or ts != ts:
+                continue
+            if triage is not None and not isinstance(triage, dict):
+                continue
+            if ts <= since:
                 continue
             row.setdefault("profile", name)
             reduced = {key: row.get(key) for key in _EVENT_FIELDS}
-            reduced["niveau"] = (row.get("triage") or {}).get("niveau")
+            reduced["niveau"] = (triage or {}).get("niveau")
             reduced["attempts"] = [{"agent": a.get("agent"), "error": a.get("error")}
                                    for a in (row.get("attempts") or []) if isinstance(a, dict)]
             events.append(reduced)
