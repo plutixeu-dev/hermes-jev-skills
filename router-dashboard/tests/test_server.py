@@ -78,6 +78,23 @@ class ServerTestCase(unittest.TestCase):
         self.assertIn("Hermes Model Routing", html)
         self.assertIn("Apply changes", html)
 
+    def test_page_has_the_dispatch_card_marked_new_in_this_fork(self):
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=10) as resp:
+            html = resp.read().decode()
+        # assertTrue, not assertIn: a miss would print the whole page.
+        for name in ("dispatchCard", "dispatchNew", "dispSeg", "dispConflict", "dispNotice", "dispPrivacy",
+                     "dispAgents", "dispOrder", "dispChecks", "dispPreview", "dispReceipt", "dispLive"):
+            with self.subTest(id=name):
+                self.assertTrue('id="%s"' % name in html, "the page has no element with id=%s" % name)
+        for text in ("new in this fork", "Added in this fork: the upstream hermes-jev-skills has no dispatch."):
+            with self.subTest(text=text):
+                self.assertTrue(text in html, "the page does not say: %s" % text)
+        jev, card, pools = (html.find('id="%s"' % name) for name in ("jevCard", "dispatchCard", "poolCard"))
+        self.assertTrue(0 <= jev < card < pools, "the dispatch card sits right after the Jev routing card")
+        # The page offers Claude's model aliases from its own copy of the store's list.
+        claude_models = "const CLAUDE_MODELS = %s;" % json.dumps(list(ds.CLAUDE_MODELS))
+        self.assertTrue(claude_models in html, "the page's CLAUDE_MODELS differs from dispatch_store's")
+
     def test_state_lists_profiles_and_use_cases(self):
         code, body = self.call("/api/state")
         self.assertEqual(code, 200)
