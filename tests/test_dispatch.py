@@ -35,6 +35,28 @@ class TriageTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(record["niveau"], "tiny")
 
+    def test_every_example_line_of_reasoning_library_2_4_is_read(self):
+        """The library's own example per exit, copied verbatim from its SKILL.md (v2.4).
+
+        An ASK carries "niveau": null, because no level is chosen before the question is answered.
+        """
+        examples = [
+            'TRIAGE {"type":"TALK","exit":"PROCEED","signals":[],"niveau":"tiny","privacy":"public",'
+            '"context_tokens":20,"repo_werk":false,"interactief":true}',
+            'TRIAGE {"type":"REVIEW","exit":"ASSUME","signals":["G6"],"niveau":"tiny","privacy":"public",'
+            '"context_tokens":90,"repo_werk":false,"interactief":true,"assumption":"check spelling, grammar and clarity"}',
+            'TRIAGE {"type":"CHANGE","exit":"ASK","signals":["G4","G7"],"niveau":null,"privacy":"private",'
+            '"context_tokens":60,"repo_werk":false,"interactief":true,"question":"Welke backups tellen als oud: '
+            'ouder dan 30 dagen, of alles behalve de nieuwste 3?"}',
+            'TRIAGE {"type":"CREATE","exit":"ESCALATE","signals":["G8"],"niveau":"standard","privacy":"private",'
+            '"context_tokens":30000,"repo_werk":false,"interactief":true,"reason":"input far above my context budget"}',
+        ]
+        for text in examples:
+            with self.subTest(text=text[:60]):
+                record, errors = dispatch.parse_triage(text)
+                self.assertEqual(errors, [])
+                self.assertEqual(record["exit"], text.split('"exit":"')[1].split('"')[0])
+
     def test_no_line_is_an_error_not_a_guess(self):
         self.assertEqual(dispatch.parse_triage("Gewoon een antwoord."), (None, ["no TRIAGE line"]))
 
