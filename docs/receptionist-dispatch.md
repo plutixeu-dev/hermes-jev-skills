@@ -204,6 +204,21 @@ session. After a failed claude attempt, the next turn starts a new Claude sessio
 
 ## Rolling it out
 
+1. Open `jev dashboard`.
+2. In the "Receptionist dispatch" card, set each profile's privacy class and switch on the
+   agents you want. If the card shows the one-classifier conflict, its fix button turns Jev
+   routing off for you.
+3. Use each agent's Test button. It always tests the saved settings, not a pending edit: one
+   fixed prompt through that agent's own login, reporting whether it answered, the model, and
+   the first 80 characters of the reply.
+4. Set Shadow, then watch the "Recent dispatch decisions" table for a day: who would have
+   answered, and why turns stayed here instead.
+5. Set On.
+
+Rollback is Off, from the same switch.
+
+The chat commands stay as the alternative.
+
 1. `jev dispatch check`. It shows `policy_mode`, the mode written in dispatch.json.
    `/dispatch` without arguments shows the mode in force, since a switch or config.yaml can
    override the file.

@@ -6,6 +6,15 @@ Your agent burns frontier-model tokens on things that are not thinking: which mo
 
 That is what [Jev](https://docs.typesafe.ai) is. It is TypeSafe's decision model. **It never writes text.** You give it a state and typed questions (pick one, score this, yes or no) and it answers with a calibrated confidence. This repo wires that into an agent's day.
 
+## What this fork adds
+
+- **Receptionist dispatch** — a turn Jev judges hard goes to Codex, Claude Code or OpenRouter instead of staying on the local model, off by default. Ships as the `hermes-dispatch` plugin, `jev dispatch`, and a card on the dashboard. [receptionist-dispatch.md](docs/receptionist-dispatch.md)
+- **The privacy checks dispatch needed** — a secret value read in every common form (quoted, an env-style `NAME=value`, after a word like "is", or after a Dutch password word), an IBAN matched against the whole registry, Dutch mobile numbers, sensitive Dutch terms, and a privacy class per profile. [receptionist-dispatch.md#privacy-classes](docs/receptionist-dispatch.md#privacy-classes)
+- **Every profile of a multiplexed gateway is itself** — a gateway serving several profiles from one process used to leave every one of them reading as `default`; each now keeps its own profile, which fixes `hermes-jev` routing's `private_profiles` too, not only dispatch. [CHANGELOG.md](CHANGELOG.md)
+- **The dashboard card** — mode and notice switch per profile at once; each profile's privacy class, each agent's on/off, model and (for claude) repo-only flag, and the order they're tried are staged, previewed, then saved together with a backup and a verified read-back. No chat command required. [router-dashboard/README.md](router-dashboard/README.md)
+
+Everything else is upstream hermes-jev-skills.
+
 ![The model routing dashboard: the Jev on/shadow/off switch, the routing pools grid, and live decisions as they happen](docs/images/model-routing-dashboard.png)
 
 *`jev dashboard`. The profiles, paths and decisions here are a demo home; the pools are a real working set. `python3 scripts/demo_home.py` builds a home where nothing is real, which is where the next one comes from. One switch for Jev routing, every pool as a tier-by-work-kind grid, and each decision as it happens (tier, work kind, model, which pool it came from, confidence, latency).*

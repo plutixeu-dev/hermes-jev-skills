@@ -21,6 +21,7 @@
   - OpenRouter takes public turns only, by kind, whatever it is named.
 - The TRIAGE record follows the reasoning library's routing contract, so a local receptionist can later take Jev's place as the classifier (one classifier per turn).
 - `tests/test_turn.py` and `tests/test_question_shape.py` no longer depend on a real key being installed.
+- The dashboard's "Receptionist dispatch" card now covers everything the plugin reads: mode, notice, a privacy class per profile, each agent's on/off, model and (for claude) `only_repo`, the frontier order, clearing a cooldown, a test call per agent, and the one-classifier conflict with Jev routing, with a fix button. Mode and notice write straight to `dispatch-state.json`, the file `/dispatch` writes; privacy, agents and order are staged, previewed, then saved together to `dispatch.json`, with a backup and a verified read-back. The chat commands still work; the dashboard writes the same files they do.
 
 **Every profile of a multiplexed gateway is itself**
 
