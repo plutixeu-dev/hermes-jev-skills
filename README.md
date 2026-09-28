@@ -13,7 +13,7 @@ That is what [Jev](https://docs.typesafe.ai) is. It is TypeSafe's decision model
 - **Every profile of a multiplexed gateway is itself** — a gateway serving several profiles from one process used to leave every one of them reading as `default`; each now keeps its own profile, which fixes `hermes-jev` routing's `private_profiles` too, not only dispatch. [CHANGELOG.md](CHANGELOG.md)
 - **The dashboard card** — mode and notice switch per profile at once; each profile's privacy class, each agent's on/off, model and (for claude) repo-only flag, and the order they're tried are staged, previewed, then saved together with a backup and a verified read-back. No chat command required. [router-dashboard/README.md](router-dashboard/README.md)
 
-Everything else is upstream hermes-jev-skills.
+Everything else is upstream hermes-jev-skills. A Dutch guide to installing this fork and connecting the models: [docs/handleiding.md](docs/handleiding.md).
 
 ![The model routing dashboard: the Jev on/shadow/off switch, the routing pools grid, and live decisions as they happen](docs/images/model-routing-dashboard.png)
 
