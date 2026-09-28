@@ -193,6 +193,9 @@ class Handler(BaseHTTPRequestHandler):
 
         if path in ("/api/dispatch/switch", "/api/dispatch/plan", "/api/dispatch/apply",
                     "/api/dispatch/cooldown", "/api/dispatch/test"):
+            if not isinstance(payload, dict):
+                self._json({"error": "request body must be a JSON object"}, 400)
+                return
             if (path == "/api/dispatch/switch" and payload.get("scope") == "__all__"
                     and payload.get("confirm") is not True):
                 self._json({"error": "changing every profile requires confirm:true"}, 400)

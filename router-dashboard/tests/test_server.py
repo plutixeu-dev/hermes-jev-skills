@@ -348,6 +348,22 @@ class DispatchApiTestCase(unittest.TestCase):
         except urllib.error.HTTPError as exc:
             return exc.code, json.loads(exc.read().decode())
 
+    def _post_raw(self, path, raw_body, token=_DEFAULT_TOKEN):
+        """POST literal bytes as the body — for a body call() cannot express (call()'s own
+        body=None means "no body / GET", so it cannot send the JSON literal null)."""
+        if token is _DEFAULT_TOKEN:
+            token = self.token
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path),
+                                     data=raw_body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        if token:
+            req.add_header("X-Dashboard-Token", token)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode())
+
     # -- GET /api/dispatch/state --------------------------------------------------------
     def test_dispatch_state_returns_both_profiles(self):
         code, body = self.call("/api/dispatch/state")
@@ -438,6 +454,25 @@ class DispatchApiTestCase(unittest.TestCase):
             code, body = self.call("/api/dispatch/test", {"agent": "claude", "confirm": True})
         self.assertEqual(code, 200)
         self.assertEqual(body, fake)
+
+    # -- every /api/dispatch/* POST route: a non-object body -------------------------------
+    def test_dispatch_post_routes_reject_a_non_object_body(self):
+        """Valid JSON that is not an object (a list, a string, a number, a boolean, or the
+        literal null) must answer 400, never crash do_POST with an unhandled AttributeError
+        from payload.get(...) on a non-dict — which drops the connection instead of answering
+        at all (I1: reproduced live against router-dashboard/server.py:196-205)."""
+        paths = ["/api/dispatch/switch", "/api/dispatch/plan", "/api/dispatch/apply",
+                 "/api/dispatch/cooldown", "/api/dispatch/test"]
+        for path in paths:
+            for value in ([], "x", 1, True):
+                with self.subTest(path=path, body=value):
+                    code, body = self.call(path, value)
+                    self.assertEqual(code, 400)
+                    self.assertIn("error", body)
+            with self.subTest(path=path, body=None):
+                code, body = self._post_raw(path, b"null")
+                self.assertEqual(code, 400)
+                self.assertIn("error", body)
 
 
 class DispatchApiAuthTestCase(DispatchApiTestCase):
