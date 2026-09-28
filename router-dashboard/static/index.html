@@ -332,8 +332,7 @@
     <h3 id="allTitle">Change this for every agent?</h3>
     <p id="allText" style="margin:0 0 10px"></p>
     <pre id="allRows" style="max-height:180px"></pre>
-    <p class="small muted" style="margin:10px 0 0">Each profile's config is backed up first. Running agents keep
-      their current model until their gateway reloads.</p>
+    <p class="small muted" id="allFoot" style="margin:10px 0 0"></p>
     <div class="acts">
       <button class="ghost" id="allCancel">Cancel</button>
       <button class="danger" id="allGo">Yes, change all</button>
@@ -717,13 +716,18 @@ $("#discardBtn").onclick = () => {
   PENDING.clear(); $("#previewCard").style.display = "none"; renderAll();
 };
 
-function askAll(changes, count){
+/* The small print is model routing's: a config backed up, then a gateway reload. A caller whose write
+   works otherwise passes its own. */
+const ALL_FOOT = "Each profile's config is backed up first. Running agents keep their current model until their gateway reloads.";
+
+function askAll(changes, count, note = ALL_FOOT){
   return new Promise(resolve => {
     const lines = Object.entries(changes).flatMap(([k, f]) => Object.entries(f).map(([field, v]) =>
       (k === "__main__" ? "main model" : k) + " " + field + " → " + v));
     $("#allText").textContent = "This is not just one agent. It sets the following as the default for " + count +
       " Hermes profiles at once:";
     $("#allRows").textContent = lines.join("\n");
+    $("#allFoot").textContent = note;
     $("#allGo").textContent = "Yes, change all " + count;
     const modal = $("#allModal"); modal.classList.add("open");
     const done = v => { modal.classList.remove("open"); resolve(v); };
@@ -805,7 +809,9 @@ document.querySelectorAll("#jevSeg button").forEach(b => b.onclick = async () =>
   const r = await fetch("/api/jev/switch", {method:"POST", headers:{"Content-Type":"application/json", ...HDR},
     body: JSON.stringify({scope: all ? ALL : CURRENT, switch: "routing", value, confirm: all})}).then(x => x.json());
   if (r.error){ alert(r.error); return; }
-  SWITCHES = r; renderSwitch(); if (LIVE_TIMER) pollLive();
+  SWITCHES = r; renderSwitch();
+  loadDispatch();                   // the dispatch card's conflict note reads this same switch
+  if (LIVE_TIMER) pollLive();
 });
 
 /* --- Receptionist dispatch ---
@@ -823,6 +829,9 @@ const DISP_SOURCE = {"dashboard": "set here", "config.yaml": "from config.yaml",
 const DISP_ORDERS = [["repo", "Repository work"], ["default", "Other hard work"]];
 const DISP_FRONTIER = ["claude", "openai"];            // all that frontier_order may hold
 const DISP_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/@+\[\]-]{0,127}$/;   // jevkit.agents._MODEL_NAME; the server decides
+/* askAll's own small print is model routing's (a backup, then a reload). These writes have neither. */
+const DISP_ALL_NOTE = "Each profile's own switch file is overwritten; there is no backup. It takes effect on the next message, no restart.";
+const DISP_JEV_OFF_NOTE = "Jev routing turns off for every profile on the next message, no restart. Its switch files are rewritten; there is no backup.";
 let DISPATCH = null, DISP_PENDING = {profiles: {}, agents: {}, order: {}}, DISP_PLANNED = null;
 let DISP_TESTS = {}, DISP_SEEN = 0;
 
@@ -889,7 +898,8 @@ function renderDispMode(){
 async function dispSwitch(name, value){
   if (!DISPATCH) return;
   const all = CURRENT === ALL;
-  if (all && !(await askAll({"Receptionist dispatch": {[name]: value}}, Object.keys(DISPATCH.profiles).length))){
+  if (all && !(await askAll({"Receptionist dispatch": {[name]: value}}, Object.keys(DISPATCH.profiles).length,
+                            DISP_ALL_NOTE))){
     renderDispMode(); return;                                  // puts the notice box back
   }
   const r = await dispPost("/api/dispatch/switch", {scope: all ? ALL : CURRENT, switch: name, value, confirm: all});
@@ -902,7 +912,8 @@ $("#dispNotice").onchange = () => dispSwitch("notice", $("#dispNotice").checked 
 /* One classifier per turn: while Jev routing is on or in shadow, dispatch stands aside. */
 $("#dispConflictFix").onclick = async () => {
   const all = CURRENT === ALL;
-  if (all && !(await askAll({"Jev routing": {mode: "off"}}, Object.keys(DISPATCH.profiles).length))) return;
+  if (all && !(await askAll({"Jev routing": {mode: "off"}}, Object.keys(DISPATCH.profiles).length,
+                            DISP_JEV_OFF_NOTE))) return;
   const r = await dispPost("/api/jev/switch", {scope: all ? ALL : CURRENT, switch: "routing", value: "off", confirm: all});
   if (r.error){ alert(r.error); return; }
   SWITCHES = r; renderSwitch(); if (LIVE_TIMER) pollLive();

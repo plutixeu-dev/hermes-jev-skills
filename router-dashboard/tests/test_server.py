@@ -95,6 +95,20 @@ class ServerTestCase(unittest.TestCase):
         claude_models = "const CLAUDE_MODELS = %s;" % json.dumps(list(ds.CLAUDE_MODELS))
         self.assertTrue(claude_models in html, "the page's CLAUDE_MODELS differs from dispatch_store's")
 
+    def test_all_profiles_dialog_says_what_a_dispatch_write_does(self):
+        """askAll's small print speaks for model routing: a backup first, then a gateway reload. A
+        dispatch switch has neither, and neither has the conflict fix, so their callers pass their own."""
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=10) as resp:
+            html = resp.read().decode()
+        for text in ("Each profile's own switch file is overwritten; there is no backup. "
+                     "It takes effect on the next message, no restart.",
+                     "Jev routing turns off for every profile on the next message, no restart.",
+                     # the model-routing callers keep theirs
+                     "Each profile's config is backed up first. Running agents keep their current model "
+                     "until their gateway reloads."):
+            with self.subTest(text=text):
+                self.assertTrue(text in html, "the page does not say: %s" % text)
+
     def test_state_lists_profiles_and_use_cases(self):
         code, body = self.call("/api/state")
         self.assertEqual(code, 200)
