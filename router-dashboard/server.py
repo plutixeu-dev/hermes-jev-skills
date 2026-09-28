@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import dispatch_store as ds  # noqa: E402
 import routing_store as rs  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -154,6 +155,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/models":
             self._json({"models": rs.model_catalog(self.cfg.hermes_home)})
             return
+        if path == "/api/dispatch/state":
+            self._json(ds.state(self.cfg.hermes_home))
+            return
+        if path == "/api/dispatch/live":
+            from urllib.parse import parse_qs
+            query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            try:
+                since = float((query.get("since") or ["0"])[0])
+            except ValueError:
+                since = 0.0
+            self._json(ds.live(self.cfg.hermes_home, since=since))
+            return
         self._json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -176,6 +189,36 @@ class Handler(BaseHTTPRequestHandler):
                                              str(payload.get("switch") or ""), str(payload.get("value") or "")))
             except ValueError as exc:
                 self._json({"error": str(exc)}, 400)
+            return
+
+        if path in ("/api/dispatch/switch", "/api/dispatch/plan", "/api/dispatch/apply",
+                    "/api/dispatch/cooldown", "/api/dispatch/test"):
+            if (path == "/api/dispatch/switch" and payload.get("scope") == "__all__"
+                    and payload.get("confirm") is not True):
+                self._json({"error": "changing every profile requires confirm:true"}, 400)
+                return
+            if path == "/api/dispatch/apply" and payload.get("confirm") is not True:
+                self._json({"error": "apply requires confirm:true"}, 400)
+                return
+            if path == "/api/dispatch/test" and payload.get("confirm") is not True:
+                self._json({"error": "a test call requires confirm:true"}, 400)
+                return
+            try:
+                if path == "/api/dispatch/switch":
+                    self._json(ds.set_switch(self.cfg.hermes_home, str(payload.get("scope") or ""),
+                                             str(payload.get("switch") or ""), str(payload.get("value") or "")))
+                elif path == "/api/dispatch/plan":
+                    self._json(ds.plan(self.cfg.hermes_home, payload.get("changes")))
+                elif path == "/api/dispatch/apply":
+                    self._json(ds.apply(self.cfg.hermes_home, payload.get("changes")))
+                elif path == "/api/dispatch/cooldown":
+                    self._json(ds.reset_cooldown(self.cfg.hermes_home, str(payload.get("agent") or "")))
+                else:  # /api/dispatch/test
+                    self._json(ds.test_agent(self.cfg.hermes_home, str(payload.get("agent") or "")))
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+            except Exception as exc:  # noqa: BLE001 - reported to the caller as a diagnosable 500
+                self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
             return
 
         profile = str(payload.get("profile") or "")
@@ -226,6 +269,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--token", default=None)
     ap.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"))
     args = ap.parse_args(argv)
+    # jevkit's ladder and keystore read HERMES_HOME from the environment; without this, a
+    # --hermes-home passed only on the command line would leave them looking at a different
+    # home than the one the page shows (e.g. a fleet-wide cooldown clear or key check).
+    os.environ.setdefault("HERMES_HOME", args.hermes_home)
 
     cfg = Config(hermes_home=args.hermes_home, token=args.token)
     httpd = make_server(args.host, args.port, cfg)

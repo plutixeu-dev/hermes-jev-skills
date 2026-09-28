@@ -11,8 +11,10 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import dispatch_store as ds  # noqa: E402
 import routing_store as rs  # noqa: E402
 import server as srv  # noqa: E402
+from jevkit import dispatch, ladder  # noqa: E402
 
 CFG = """\
 model:
@@ -271,6 +273,196 @@ class AuthFlowTestCase(unittest.TestCase):
         code, _, body = self.get("/api/state")
         self.assertEqual(code, 401)
         self.assertIn("unauthorized", json.loads(body)["error"])
+
+
+_DEFAULT_TOKEN = object()  # "use self.token", so an explicit token=None in a call means "send none"
+
+
+class DispatchApiTestCase(unittest.TestCase):
+    """/api/dispatch/*: the same real-server fixture as ServerTestCase, with JEV_LADDER_STATE and
+    XDG_CONFIG_HOME pointed into the temp home and jevkit.keystore.resolve patched to None, so no
+    real key store or ladder is ever touched.
+
+    `token` is a class attribute a subclass overrides to require auth (see DispatchApiAuthTestCase
+    below, the token subclass pattern): `call()` sends it by default, so every test here still
+    passes once a token is required, and a test that wants to check the unauthenticated case passes
+    `token=None` explicitly to override that default.
+    """
+
+    token = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.home = cls.tmp.name
+        with open(os.path.join(cls.home, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(CFG)
+        os.makedirs(os.path.join(cls.home, "profiles", "wiki"), exist_ok=True)
+        with open(os.path.join(cls.home, "profiles", "wiki", "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(CFG)
+
+        cls.env = mock.patch.dict(os.environ, {
+            "XDG_CONFIG_HOME": os.path.join(cls.home, "xdg"),
+            "JEV_LADDER_STATE": os.path.join(cls.home, "jev", "ladder.json"),
+        })
+        cls.env.start()
+        for name in ("JEV_DISPATCH_POLICY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY"):
+            os.environ.pop(name, None)
+
+        # This sandbox's own `claude`/`codex` on PATH must never leak into a check_agents() result.
+        cls.which_patch = mock.patch("shutil.which", return_value=None)
+        cls.which_patch.start()
+        # state() calls check_agents with its default has_key, which calls keystore.resolve():
+        # on macOS that would shell out to the real Keychain. Never real, whatever the machine.
+        cls.keystore_patch = mock.patch.object(dispatch.keystore, "resolve", return_value=None)
+        cls.keystore_patch.start()
+
+        cfg = srv.Config(cls.home, cls.token)
+        cls.httpd = srv.make_server("127.0.0.1", 0, cfg)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.keystore_patch.stop()
+        cls.which_patch.stop()
+        cls.env.stop()
+        cls.tmp.cleanup()
+
+    def call(self, path, body=None, token=_DEFAULT_TOKEN):
+        if token is _DEFAULT_TOKEN:
+            token = self.token
+        url = "http://127.0.0.1:%d%s" % (self.port, path)
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method="POST" if body is not None else "GET")
+        if data:
+            req.add_header("Content-Type", "application/json")
+        if token:
+            req.add_header("X-Dashboard-Token", token)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode())
+
+    # -- GET /api/dispatch/state --------------------------------------------------------
+    def test_dispatch_state_returns_both_profiles(self):
+        code, body = self.call("/api/dispatch/state")
+        self.assertEqual(code, 200)
+        self.assertEqual(set(body["profiles"]), {"default", "wiki"})
+
+    # -- POST /api/dispatch/switch -------------------------------------------------------
+    def test_dispatch_switch_sets_one_profile_from_dashboard(self):
+        code, body = self.call("/api/dispatch/switch", {"scope": "wiki", "switch": "mode", "value": "shadow"})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["profiles"]["wiki"]["mode"], {"value": "shadow", "source": "dashboard"})
+
+    def test_dispatch_switch_all_without_confirm_is_rejected(self):
+        code, body = self.call("/api/dispatch/switch", {"scope": "__all__", "switch": "mode", "value": "on"})
+        self.assertEqual(code, 400)
+        self.assertIn("confirm", body["error"])
+
+    def test_dispatch_switch_bad_value_is_rejected(self):
+        code, body = self.call("/api/dispatch/switch", {"scope": "wiki", "switch": "mode", "value": "bogus"})
+        self.assertEqual(code, 400)
+
+    # -- POST /api/dispatch/plan ---------------------------------------------------------
+    def _read_if_exists(self, path):
+        if not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_dispatch_plan_previews_without_writing(self):
+        # Read the fleet file's own before/after, rather than asserting it is absent: another
+        # test in this class may have already created it (independent tests share one home).
+        fleet = os.path.join(self.home, "jev", "dispatch.json")
+        before = self._read_if_exists(fleet)
+        code, body = self.call("/api/dispatch/plan", {"changes": {"agents": {"claude": {"enabled": True}}}})
+        self.assertEqual(code, 200)
+        self.assertIn({"setting": "agents.claude.enabled", "before": False, "after": True}, body["rows"])
+        self.assertEqual(self._read_if_exists(fleet), before)
+
+    # -- POST /api/dispatch/apply --------------------------------------------------------
+    def test_dispatch_apply_requires_confirm(self):
+        code, body = self.call("/api/dispatch/apply", {"changes": {"agents": {"openai": {"enabled": True}}}})
+        self.assertEqual(code, 400)
+        self.assertIn("confirm", body["error"])
+
+    def test_dispatch_apply_writes_and_verifies(self):
+        code, body = self.call("/api/dispatch/apply", {"confirm": True,
+                                                        "changes": {"agents": {"openai": {"enabled": True}}}})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"], body)
+        self.assertTrue(body["verified"])
+        fleet = os.path.join(self.home, "jev", "dispatch.json")
+        with open(fleet, encoding="utf-8") as fh:
+            self.assertTrue(json.load(fh)["agents"]["openai"]["enabled"])
+
+    # -- GET /api/dispatch/live ----------------------------------------------------------
+    def test_dispatch_live_returns_only_dispatch_rows(self):
+        log = os.path.join(self.home, "logs", "jev-decisions.jsonl")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": 1, "kind": "route", "tier": "medium", "model": "m"}) + "\n")
+            fh.write(json.dumps({"ts": 2, "kind": "dispatch", "agent": "openai", "model": "gpt-6"}) + "\n")
+        code, body = self.call("/api/dispatch/live?since=0")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(body["events"]), 1)
+        self.assertEqual(body["events"][0]["agent"], "openai")
+        self.assertEqual(body["events"][0]["model"], "gpt-6")
+
+    # -- POST /api/dispatch/cooldown ------------------------------------------------------
+    def test_dispatch_cooldown_resets_and_rejects_unknown_agent(self):
+        ladder.refuse("dispatch:claude", "quota", cooldown=900)
+        self.assertGreater(ladder.cooling("dispatch:claude"), 0)
+        code, body = self.call("/api/dispatch/cooldown", {"agent": "claude"})
+        self.assertEqual(code, 200)
+        self.assertEqual(ladder.cooling("dispatch:claude"), 0)
+        self.assertEqual(body["agents"]["claude"]["cooling_s"], 0)
+
+        code, body = self.call("/api/dispatch/cooldown", {"agent": "bogus"})
+        self.assertEqual(code, 400)
+
+    # -- POST /api/dispatch/test ----------------------------------------------------------
+    def test_dispatch_test_requires_confirm_then_returns_the_fake_result(self):
+        code, body = self.call("/api/dispatch/test", {"agent": "claude"})
+        self.assertEqual(code, 400)
+        self.assertIn("confirm", body["error"])
+
+        fake = {"ok": True, "agent": "claude", "model": "opus", "answer": "ok"}
+        with mock.patch.object(ds, "test_agent", return_value=fake):
+            code, body = self.call("/api/dispatch/test", {"agent": "claude", "confirm": True})
+        self.assertEqual(code, 200)
+        self.assertEqual(body, fake)
+
+
+class DispatchApiAuthTestCase(DispatchApiTestCase):
+    """The token subclass pattern: same fixture and every test above (now sent WITH the token
+    by call()'s default), plus one test that every /api/dispatch/* route refuses without it."""
+
+    token = "s3cret-dispatch"
+
+    def test_dispatch_routes_require_the_token(self):
+        get_paths = ["/api/dispatch/state", "/api/dispatch/live?since=0"]
+        post_calls = [
+            ("/api/dispatch/switch", {"scope": "wiki", "switch": "mode", "value": "shadow"}),
+            ("/api/dispatch/plan", {"changes": {}}),
+            ("/api/dispatch/apply", {"changes": {}, "confirm": True}),
+            ("/api/dispatch/cooldown", {"agent": "claude"}),
+            ("/api/dispatch/test", {"agent": "claude", "confirm": True}),
+        ]
+        for path in get_paths:
+            with self.subTest(path=path):
+                code, _ = self.call(path, token=None)
+                self.assertEqual(code, 401)
+        for path, payload in post_calls:
+            with self.subTest(path=path):
+                code, _ = self.call(path, payload, token=None)
+                self.assertEqual(code, 401)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
