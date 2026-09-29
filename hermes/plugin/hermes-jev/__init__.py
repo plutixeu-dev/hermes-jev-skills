@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .jevkit import catalog, choose, compact, keystore, ladder, rerank, route, search, skillpick, supervise, turn
+from .jevkit import catalog, choose, compact, frontdesk, keystore, ladder, rerank, route, search, skillpick, supervise, turn
 
 _LOCK = threading.Lock()
 _TURNS: Dict[str, Dict[str, Any]] = {}      # session_id -> the current turn's text and decision
@@ -103,14 +103,6 @@ def _hermes_config() -> Dict[str, Any]:
         return config if isinstance(config, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
-
-
-def _default_model() -> Optional[str]:
-    try:
-        model = _hermes_config().get("model") or {}
-        return model.get("default") if isinstance(model, dict) else str(model)
-    except Exception:  # noqa: BLE001
-        return None
 
 
 def _disabled_skills() -> Any:
@@ -261,19 +253,18 @@ def _on_llm_request(request: Optional[Dict[str, Any]] = None, session_id: str = 
     decision = turn["decision"]
     if decision is None:                       # first API call of this turn: ask Jev exactly once
         catalog_provider = catalog.HERMES_ALIASES.get(provider, provider)
-        # Some Hermes paths hand us an already-prefixed model id; normalising here keeps
-        # the decision string honest and keeps the pinned check comparing like with like.
-        bare = model.split(":", 1)[1] if model.startswith(f"{catalog_provider}:") else model
+        # Some Hermes paths hand us an already-prefixed model id. Only that prefix comes off: an
+        # Ollama tag (`qwen3.5:4b`) is part of the model's name.
+        bare = frontdesk.bare_model(model, [provider])
         current = f"{catalog_provider}:{bare}"
-        default = _default_model()
-        default_bare = str(default).split(":", 1)[-1] if default else ""
         messages = request.get("messages") or request.get("input") or []
         try:
             decision = route.decide(
                 turn["text"], current=current, profile=_profile(), only_provider=catalog_provider, session_id=session_id,
                 context_tokens=len(json.dumps(messages, default=str)) // 4,
                 has_images="image_url" in json.dumps(messages[-1:], default=str),
-                pinned=bool(default_bare) and bare != default_bare,   # you ran /model: your choice wins
+                # /model in this chat: your choice wins. The receptionist and its fallbacks never are one.
+                pinned=frontdesk.is_pinned(model, provider, _hermes_config()),
                 # Answers bought in the pre-call request by `turn.decide_turn`, when that
                 # request was allowed to carry them. None means ask here, as before.
                 answers=turn.get("route_answers"))

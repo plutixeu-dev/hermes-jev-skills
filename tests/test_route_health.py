@@ -390,8 +390,7 @@ class PluginCase(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         # Where Hermes is importable these would read the machine's real config.yaml.
-        for patch in (mock.patch.object(plugin, "_default_model", lambda: DEFAULT),
-                      mock.patch.object(plugin, "_hermes_config", lambda: {})):
+        for patch in (mock.patch.object(plugin, "_hermes_config", lambda: {}),):
             patch.start()
             self.addCleanup(patch.stop)
         self.addCleanup(plugin._TURNS.clear)

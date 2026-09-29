@@ -43,7 +43,7 @@ class RoutingMiddlewareTests(unittest.TestCase):
 
         for patch in (
             mock.patch.object(plugin, "_setting", lambda name, default: "on" if name == "routing" else default),
-            mock.patch.object(plugin, "_default_model", lambda: DEFAULT),
+            mock.patch.object(plugin, "_hermes_config", lambda: {"model": {"provider": "openrouter", "default": DEFAULT}}),
             mock.patch.object(plugin, "_log", self.logs.append),
             mock.patch.object(plugin.route, "decide", side_effect=fake_decide),
         ):
@@ -110,6 +110,17 @@ class RoutingMiddlewareTests(unittest.TestCase):
         self.assertEqual(again["request"]["model"], "moonshotai/kimi-k3")
         self.assertFalse([x for x in self.logs if x["kind"] == "route_effective"][-1]["first_request"])
         self.assertEqual(len([x for x in self.logs if x["kind"] == "route" and x.get("from")]), 3)
+
+    def test_an_ollama_receptionist_is_asked_about_not_pinned(self):
+        """2026-09-29 20:57:09: model.default qwen3.5:4b was read as "4b", so the turn counted as
+        pinned, routing never asked Jev, and the 4B answered a whole website on its own."""
+        with mock.patch.object(plugin, "_hermes_config",
+                               lambda: {"model": {"provider": "custom", "default": "qwen3.5:4b"}}):
+            plugin._on_pre_llm_call(session_id="ollama", turn_id="t1", user_message=HARD)
+            plugin._on_llm_request(request={"messages": [{"role": "user", "content": HARD}], "model": "qwen3.5:4b"},
+                                   session_id="ollama", turn_id="t1", model="qwen3.5:4b", provider="custom")
+        self.assertFalse(self.decisions[-1]["pinned"])
+        self.assertEqual(self.decisions[-1]["current"], "custom:qwen3.5:4b")
 
 class MergedRequestTests(unittest.TestCase):
     """One request for both decisions, and the three ways it can go.
