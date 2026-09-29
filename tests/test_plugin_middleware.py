@@ -280,8 +280,8 @@ class FrontDeskTests(unittest.TestCase):
             self.assertIn("front desk decides", plugin._jev_command(""))
 
 
-QUIET_CODES = ("no_key", "auth_failed", "credits_exhausted", "rate_limited", "overloaded", "network", "timeout",
-               "malformed", "invalid_response", "http_500")
+QUIET_CODES = ("no_key", "auth_failed", "forbidden", "credits_exhausted", "rate_limited", "overloaded", "network",
+               "timeout", "state_too_large", "malformed", "invalid_response", "http_500")
 
 
 class QuietFailureTests(unittest.TestCase):

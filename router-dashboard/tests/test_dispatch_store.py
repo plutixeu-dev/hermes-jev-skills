@@ -467,7 +467,8 @@ class DispatchStoreTests(unittest.TestCase):
                   "attempts": [{"agent": "openai", "error": "quota", "extra": "nope"}],
                   "chat_model": "qwen3.5:4b", "api_mode": "chat_completions", "handed_over": True,
                   "jev": {"call": "called", "latency_ms": 412, "via": "openrouter", "read": "text", "tier": "hard",
-                          "specialty": "coding", "confidence": 0.9, "prompt": "must never appear"},
+                          "specialty": "coding", "confidence": 0.9, "build": "jev-1.13-20260917",
+                          "cost": 0.00002, "prompt": "must never appear"},
                   "text": "must never appear", "session": "must never appear", "prompt": "must never appear"})
         out = ds.live(self.home)
         self.assertEqual(len(out["events"]), 1)
@@ -478,7 +479,8 @@ class DispatchStoreTests(unittest.TestCase):
                                  "chat_model": "qwen3.5:4b", "api_mode": "chat_completions", "handed_over": True,
                                  "niveau": "frontier", "source": None,
                                  "jev": {"call": "called", "latency_ms": 412, "via": "openrouter", "read": "text",
-                                         "tier": "hard", "specialty": "coding", "confidence": 0.9},
+                                         "tier": "hard", "specialty": "coding", "confidence": 0.9,
+                                         "build": "jev-1.13-20260917"},
                                  "outcome": "agent", "attempts": [{"agent": "openai", "error": "quota"}]})
         blob = json.dumps(out)
         for leaked in ("must never appear", "type", "CHANGE", "extra", "nope"):

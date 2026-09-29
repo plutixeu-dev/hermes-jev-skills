@@ -493,8 +493,8 @@ def questions() -> Dict[str, Any]:
     """The three questions routing asks about one turn, in one object.
 
     Separate from `decide` so another decision can be asked in the same request (see
-    `jevkit/turn.py`): Jev charges one round trip per request, so the questions routing
-    needs and the questions skill selection needs cost the same together as apart.
+    `jevkit/turn.py`): combining saves a round trip. Jev bills input tokens, about $0.00002 a
+    call, so the questions routing needs and the ones skill selection needs cost no more together.
     """
     return {
         "difficulty": client.score("How demanding is it to complete this turn well?", DIFFICULTY),

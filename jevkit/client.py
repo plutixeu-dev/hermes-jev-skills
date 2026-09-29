@@ -233,6 +233,17 @@ def _close(connection: Any) -> None:
         pass
 
 
+# A non-200 status as the code callers read, named as the TypeSafe SDK names them. 403 is not a bad
+# key: the provider knows the key and will not let it do this (a model it may not use). 413 is a
+# state the provider found too large. Redirects and anything else keep their number.
+_STATUS_CODES = {401: "auth_failed", 402: "credits_exhausted", 403: "forbidden", 413: "state_too_large",
+                 429: "rate_limited", 529: "overloaded"}
+
+
+def _status_code(status: int) -> str:
+    return _STATUS_CODES.get(status, f"http_{status}")
+
+
 def _http_transport(body: bytes, headers: Dict[str, str], timeout: float, url: str = ENDPOINT,
                     max_bytes: int = MAX_RESPONSE_BYTES) -> bytes:
     """POST one request over a pooled connection. Redirects are never followed.
@@ -265,10 +276,7 @@ def _http_transport(body: bytes, headers: Dict[str, str], timeout: float, url: s
             raise JevError("response_too_large")
         if status != 200:
             _POOL.drop(connection)
-            code = {301: "http_301", 302: "http_302", 303: "http_303", 307: "http_307", 308: "http_308",
-                    401: "auth_failed", 403: "auth_failed", 402: "credits_exhausted",
-                    429: "rate_limited", 529: "overloaded"}.get(status, f"http_{status}")
-            raise JevError(code)
+            raise JevError(_status_code(status))
         _POOL.release(key, connection)
         return raw
     raise JevError("network")
@@ -290,7 +298,10 @@ def post(url: str, body: bytes, headers: Dict[str, str], timeout: float,
     return _http_transport(body, headers, timeout, url, max_bytes)
 
 
-_RETRYABLE = {"rate_limited", "overloaded", "network", "http_500", "http_502", "http_503", "http_504"}
+# 408 is the provider giving up on a slow request, 524 is OpenRouter's gateway timing out: both are
+# worth the one retry the budget allows, as the SDK retries them.
+_RETRYABLE = {"rate_limited", "overloaded", "network", "http_408", "http_500", "http_502", "http_503", "http_504",
+              "http_524"}
 
 
 # ── validation ───────────────────────────────────────────────────────────────
@@ -409,8 +420,10 @@ def _check_answer(name: str, question: Mapping[str, Any], answer: Any) -> Dict[s
     if isinstance(answer.get("legend"), dict):
         legend = {int(key): str(text) for key, text in answer["legend"].items()
                   if str(key).isdigit() and int(key) < levels and isinstance(text, str)}
+    # The schema requires a score's confidence. A reply without one is no evidence of certainty,
+    # so it counts as unsure: read as 1.0, a malformed reply bought the cheapest tier.
     out = {"type": "score", "score": float(value), "probabilities": spread,
-           "spread_reported": bool(spread), "confidence": _unit(answer.get("confidence", 1.0),
+           "spread_reported": bool(spread), "confidence": _unit(answer.get("confidence", 0.0),
                                                                f"{name}.confidence")}
     if legend:
         out["legend"] = legend
@@ -432,7 +445,10 @@ def ask(
 ) -> Dict[str, Any]:
     """Ask Jev every question against one state, in a single request.
 
-    Returns ``{"answers": {...validated...}, "usage": {...}, "latency_ms": int}``.
+    Returns ``{"answers": {...validated...}, "usage": {...}, "latency_ms": int, "via": str,
+    "model": str, "build": str, "cost": float | None}``. ``model`` is what was asked for (an
+    alias such as ``jev-latest``); ``build`` is the exact build that answered, "" when the reply
+    names none; ``cost`` is the provider's price for the call when it reports one.
     Raises ``JevError`` for anything the caller should not act on. ``timeout`` is a
     total wall-clock budget across retries, not a per-attempt one.
     """
@@ -491,7 +507,19 @@ def ask(
     checked = {name: _check_answer(name, question, answers.get(name)) for name, question in questions.items()}
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
     return {"answers": checked, "usage": usage, "latency_ms": int((time.monotonic() - started) * 1000),
-            "via": via, "model": sent_model}
+            "via": via, "model": sent_model, "build": _build(payload.get("model")), "cost": _cost(usage.get("cost"))}
+
+
+def _build(value: Any) -> str:
+    """The build a reply says answered it, for the log: a short string or nothing."""
+    return value.strip() if isinstance(value, str) and 0 < len(value.strip()) <= 120 else ""
+
+
+def _cost(value: Any) -> Optional[float]:
+    """What the provider says the call cost, when it says so with a real, non-negative number."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(float(value)) and value >= 0 else None
 
 
 def verify_key(api_key: str, timeout: float = 10.0, provider: str = "typesafe") -> bool:

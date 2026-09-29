@@ -107,4 +107,5 @@ def check(hermes_home: str, provider: str, *, transport: Optional[client.Transpo
     except client.JevError as error:
         return {"ok": False, "provider": provider, "model": _model_for(provider), "error": error.code}
     return {"ok": True, "provider": provider, "model": reply.get("model") or _model_for(provider),
-            "latency_ms": reply.get("latency_ms"), "answer": round(float(reply["answers"]["ok"]["noul"]), 2)}
+            "build": reply.get("build") or "", "latency_ms": reply.get("latency_ms"),
+            "answer": round(float(reply["answers"]["ok"]["noul"]), 2)}

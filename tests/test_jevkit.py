@@ -756,6 +756,56 @@ class OpenRouterProviderTests(unittest.TestCase):
         self.assertEqual((reply["via"], reply["model"]), ("typesafe", client.DEFAULT_MODEL))
 
 
+class DocsContractTests(unittest.TestCase):
+    """What the Jev docs, the TypeSafe SDK and OpenRouter's docs say a reply and an error mean."""
+
+    def reply(self, payload, questions=None):
+        return client.ask("state", questions or {"q": client.noul("x")}, api_key=KEY, timeout=2,
+                          transport=lambda body, headers, timeout: json.dumps(payload).encode())
+
+    def test_a_score_without_confidence_is_unsure_and_buys_no_tier(self):
+        """The schema requires a score's confidence. Read as 1.0, a reply missing it bought the
+        cheapest tier for a harmless turn; read as 0.0, nothing is earned and the turn stays put."""
+        asked = route.questions()
+        kind = choice_answer(asked["kind"], "coding", confidence=0.95)
+        reply = self.reply({"answers": {"difficulty": {"type": "score", "score": 0.0},
+                                        "kind": kind, "costly_mistake": {"type": "noul", "noul": 0.0}}}, asked)
+        self.assertEqual(reply["answers"]["difficulty"]["confidence"], 0.0)
+        judged = route.judge_answers(reply["answers"], route.DEFAULT_CONFIG, risky=False, features_only=False)
+        self.assertIsNone(judged["tier"])
+
+    def test_a_reply_names_the_build_that_answered_and_what_it_cost(self):
+        reply = self.reply({"model": "typesafe/jev-1.13-20260917", "usage": {"cost": 0.00002},
+                            "answers": {"q": {"type": "noul", "noul": 0.5}}})
+        self.assertEqual((reply["build"], reply["cost"]), ("typesafe/jev-1.13-20260917", 0.00002))
+        self.assertEqual(reply["model"], client.DEFAULT_MODEL)          # what was asked for stays
+
+    def test_a_build_or_cost_of_the_wrong_shape_is_left_out(self):
+        for model, cost in ((7, True), (None, "0.1"), ("", float("nan")), ("x" * 500, -1.0)):
+            with self.subTest(model=model, cost=cost):
+                reply = self.reply({"model": model, "usage": {"cost": cost},
+                                    "answers": {"q": {"type": "noul", "noul": 0.5}}})
+                self.assertEqual((reply["build"], reply["cost"]), ("", None))
+
+    def test_statuses_are_named_as_the_sdk_names_them(self):
+        named = {status: client._status_code(status) for status in (401, 402, 403, 413, 429, 529, 302, 418)}
+        self.assertEqual(named, {401: "auth_failed", 402: "credits_exhausted", 403: "forbidden",
+                                 413: "state_too_large", 429: "rate_limited", 529: "overloaded",
+                                 302: "http_302", 418: "http_418"})
+
+    def test_a_request_timeout_and_a_gateway_timeout_are_retried(self):
+        self.assertLessEqual({"http_408", "http_524"}, client._RETRYABLE)
+        attempts = []
+
+        def slow_once(body, headers, timeout):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise client.JevError("http_524")
+            return json.dumps({"answers": {"q": {"type": "noul", "noul": 0.5}}}).encode()
+        reply = client.ask("state", {"q": client.noul("x")}, api_key=KEY, timeout=2, transport=slow_once)
+        self.assertEqual((len(attempts), reply["answers"]["q"]["noul"]), (2, 0.5))
+
+
 if __name__ == "__main__":
     unittest.main()
 

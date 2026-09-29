@@ -2048,6 +2048,7 @@ The official schema, the TypeSafe SDK and the OpenRouter docs show five gaps (re
   - `tests/test_agents.py`: an OpenRouter agent call whose `client.post` raises `JevError("forbidden")` fails with the code `auth`, as a 403 did before.
   - `tests/test_dispatch.py`: with the `Wire` fake, whose reply says `"model": "jev-test"`, `record["jev"]["build"] == "jev-test"`.
   - `router-dashboard/tests/test_keys_store.py`: a check whose reply names a build returns it as `build`.
+  - `QUIET_CODES` in `tests/test_plugin_middleware.py` and `tests/test_dispatch_plugin.py` gain `forbidden` and `state_too_large`, so the quiet-failure tests cover the new codes.
 - [ ] **Step 2: Run and see them fail.**
 - [ ] **Step 3: Implement.**
   - **`client._check_answer`:** a missing score `confidence` becomes 0.0. The schema requires it, and a reply without it is no evidence of certainty.
@@ -2057,7 +2058,7 @@ The official schema, the TypeSafe SDK and the OpenRouter docs show five gaps (re
     - `"via"` and `"model"` stay.
   - **Status codes:** move the status map into `_status_code(status)`, add `403: "forbidden"` and `413: "state_too_large"`, and add `"http_408"` and `"http_524"` to `_RETRYABLE`.
   - **`agents.run_openrouter`:** maps `forbidden` to `auth` too.
-  - **The Jev block:** `classify_with_jev` puts `build` in the `called` block. `_JEV_KEPT` in hermes-dispatch and `_JEV_FIELDS` in `dispatch_store` keep `build`. `keys_store.check` returns `build`.
+  - **The Jev block:** `classify_with_jev` puts `build`, and `cost` when the provider reports it, in the `called` block. `_JEV_KEPT` in hermes-dispatch keeps both in the log; `_JEV_FIELDS` in `dispatch_store` keeps `build` for the page. `keys_store.check` returns `build`.
   - **Comments:** in `route.questions`, in `turn.py`'s module docstring and in hermes-jev's merge comment, "Jev charges per request" becomes "combining saves a round trip; Jev bills input tokens, about $0.00002 a call".
 - [ ] **Step 4: Run** the tests, then the three global commands.
 - [ ] **Step 5: Commit.** Message: `jev client: an answer without confidence is unsure; the build that answered, 403 and 413 named, 408 and 524 retried`.

@@ -20,8 +20,8 @@ sys.modules["hermes_dispatch_under_test"] = plugin
 spec.loader.exec_module(plugin)
 
 REAL_DISPATCH_TURN = plugin.dispatch.dispatch_turn       # before any test patches it
-QUIET_CODES = ("no_key", "auth_failed", "credits_exhausted", "rate_limited", "overloaded", "network", "timeout",
-               "malformed", "invalid_response", "http_500")
+QUIET_CODES = ("no_key", "auth_failed", "forbidden", "credits_exhausted", "rate_limited", "overloaded", "network",
+               "timeout", "state_too_large", "malformed", "invalid_response", "http_500")
 REQUEST = {"model": "qwen36", "messages": [{"role": "user", "content": "Find the race in the scheduler"}]}
 
 
@@ -125,11 +125,13 @@ class MiddlewareTests(unittest.TestCase):
         self.mode("on")
         self.answer = {**self.answer, "jev": {"call": "called", "latency_ms": 412, "via": "openrouter",
                                               "model": "~typesafe/jev-latest", "read": "text", "tier": "hard",
-                                              "specialty": "coding", "confidence": 0.9}}
+                                              "specialty": "coding", "confidence": 0.9,
+                                              "build": "typesafe/jev-1.13-20260917", "cost": 0.00002}}
         self.call()
         row = self.logs[-1]
         self.assertEqual((row["jev"]["call"], row["jev"]["tier"], row["jev"]["latency_ms"], row["handed_over"]),
                          ("called", "hard", 412, True))
+        self.assertEqual((row["jev"]["build"], row["jev"]["cost"]), ("typesafe/jev-1.13-20260917", 0.00002))
         self.assertEqual((row["chat_model"], row["api_mode"]), ("qwen36", "chat_completions"))
         self.assertNotIn("text", row)
 

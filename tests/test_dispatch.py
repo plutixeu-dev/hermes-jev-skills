@@ -457,6 +457,11 @@ class ClassifyTests(unittest.TestCase):
                          ("called", "typesafe", "text", "hard", "coding"))
         self.assertIsInstance(jev["latency_ms"], int)
 
+    def test_the_build_that_answered_is_kept_beside_the_model_asked_for(self):
+        jev = self.classify(transport=Wire())["jev"]
+        self.assertEqual((jev["build"], jev["model"]), ("jev-test", dispatch.client.DEFAULT_MODEL))
+        self.assertNotIn("cost", jev)                   # the Wire fake reports none
+
     def test_a_failed_call_is_kept_as_fail_open_with_its_code(self):
         def down(*_):
             raise dispatch.client.JevError("rate_limited")

@@ -281,7 +281,8 @@ def run_openrouter(prompt: str, *, model: str, timeout: float = 120.0,
     try:
         raw = (transport or client.post)(OPENROUTER_URL, body, headers, timeout)
     except client.JevError as error:
-        code = {"rate_limited": "quota", "credits_exhausted": "quota", "auth_failed": "auth"}.get(error.code, "failed")
+        code = {"rate_limited": "quota", "credits_exhausted": "quota", "auth_failed": "auth",
+                "forbidden": "auth"}.get(error.code, "failed")
         raise AgentError(code, f"openrouter {error.code}") from None
     except (ValueError, OSError):
         raise AgentError("failed", "openrouter request could not be sent") from None

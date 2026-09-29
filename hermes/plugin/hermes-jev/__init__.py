@@ -246,7 +246,7 @@ def _on_pre_llm_call(session_id: str = "", turn_id: Any = None, user_message: An
     if skills_on and routing_on and _setting("merge_requests", "on") == "on":
         # One request buys both decisions: routing's three questions and skill selection's
         # stage 1. Measured 2026-09-21 on a 379-skill catalog: 540 ms + 647 ms separately,
-        # 620 ms together, because Jev charges per request and not per question.
+        # 620 ms together. Combining saves a round trip; Jev bills input tokens, about $0.00002 a call.
         merged = turn.decide_turn(text, skills, profile=_profile())
         if merged.get("status") == "ok":
             with _LOCK:

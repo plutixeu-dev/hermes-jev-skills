@@ -173,6 +173,13 @@ class OpenRouterTests(unittest.TestCase):
             agents.run_openrouter(PROMPT, model="m", key="k", transport=transport)
         self.assertEqual(caught.exception.code, "quota")
 
+    def test_403_is_auth_as_it_was_before_it_had_its_own_code(self):
+        def transport(*_):
+            raise client.JevError("forbidden")
+        with self.assertRaises(agents.AgentError) as caught:
+            agents.run_openrouter(PROMPT, model="m", key="k", transport=transport)
+        self.assertEqual(caught.exception.code, "auth")
+
     def test_no_key_is_auth_and_nothing_is_sent(self):
         def transport(*_):
             raise AssertionError("sent without a key")

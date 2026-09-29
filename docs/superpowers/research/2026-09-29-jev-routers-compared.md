@@ -37,8 +37,8 @@ Of about 30 routers read, **none hands a whole turn from a small local reception
 | Idea | Source (license) | Verdict |
 |---|---|---|
 | A health summary: how often Jev was called, failed or not asked, who answered, mean latency | jev-gateway dashboard (MIT) | **Adopted in this plan** (Task 9 summary, Task 10 health line) |
-| Plain explanations of Jev errors, and 403 kept apart from 401 | jev-gateway setup; TypeSafe SDK | **Adopted** (Task 13 codes, Task 10 texts) |
-| Log the exact Jev build that answered, and its cost | TypeSafe and OpenRouter response fields | **Adopted** (Task 13) |
+| Plain explanations of Jev errors, and 403 kept apart from 401 | jev-gateway setup; TypeSafe SDK | **Adopted** (Task 9b codes, Task 10 texts) |
+| Log the exact Jev build that answered, and its cost | TypeSafe and OpenRouter response fields | **Adopted** (Task 9b) |
 | A follow-up question that keeps the previous agent: "yes, do it" after a Claude plan must not fall back to the 4B | jcm-router (`is_followup` ≥ 0.55), hyspacex (earlier-request field), both MIT | **Next plan.** It changes the decision and has a privacy question: Jev reads only features for private turns |
 | Reasoning effort per agent, asked in the same Jev request, clamped to what each CLI supports | Switchboard (Apache-2.0), gargpratyush (MIT); upstream 0.22 `jevkit/effort.py` (MIT) | **Next plan**, via the upstream merge. Pass it on as `claude --effort` and `codex exec -c model_reasoning_effort=…`. Default medium, cap high: upstream measured high effort at 1.79× the tokens of medium for no first-try gain |
 | Quota before the limit: read `x-codex-*-used-percent` and `anthropic-ratelimit-unified-*` headers, pace use against the window | hyspacex `quota.py` (MIT), auto-model-router `quota.py` (MIT); jevonian's header names (AGPL, facts only) | **Next plan** (spec part 4) |
@@ -60,14 +60,14 @@ These are correct already:
 - the decision cache.
 
 Mismatches:
-1. **A score answer without `confidence` counted as fully sure** (`client._check_answer` defaulted it to 1.0), so a malformed reply could buy the cheapest tier. The schema requires it. **Fixed in Task 13:** it now counts as unsure.
+1. **A score answer without `confidence` counted as fully sure** (`client._check_answer` defaulted it to 1.0), so a malformed reply could buy the cheapest tier. The schema requires it. **Fixed in Task 9b:** it now counts as unsure.
 2. **We call the moving alias** (`jev-latest`, `~typesafe/jev-latest`) while our thresholds are tuned to one build. The docs and OpenRouter's skill say to pin a version (`jev-1.13.0`, `typesafe/jev-1.13`). **Proposed**, not done: it changes what Sander sees on OpenRouter and needs a shadow run first.
-3. **We dropped the build that answered, and the cost.** **Fixed in Task 13.**
+3. **We dropped the build that answered, and the cost.** **Fixed in Task 9b.**
 4. **`TYPESAFE_MODEL` overrides the model for both providers**, so a TypeSafe id sent to OpenRouter fails every turn. Proposed: one override per provider.
-5. **Retries.** 408 and OpenRouter's 524 were not retried (**fixed in Task 13**). `Retry-After` is ignored and the backoff is linear; within a 2.5 s budget that matters little.
-6. **403 read as a bad key, 413 as an unknown error.** The SDK treats 403 as permission denied. **Fixed in Task 13:** `forbidden` and `state_too_large`.
+5. **Retries.** 408 and OpenRouter's 524 were not retried (**fixed in Task 9b**). `Retry-After` is ignored and the backoff is linear; within a 2.5 s budget that matters little.
+6. **403 read as a bad key, 413 as an unknown error.** The SDK treats 403 as permission denied. **Fixed in Task 9b:** `forbidden` and `state_too_large`.
 7. **The difficulty rubric mixes two things.** Level 3 folds in "high-stakes … legal or money", which `costly_mistake` already asks. The docs warn this lowers confidence. Proposed, measured in shadow before changing.
-8. **Two comments said Jev charges per request.** Billing is per input token ($0.042 per million, about $0.00002 per call); combining questions saves a round trip, not money. **Fixed in Task 13.**
+8. **Two comments said Jev charges per request.** Billing is per input token ($0.042 per million, about $0.00002 per call); combining questions saves a round trip, not money. **Fixed in Task 9b.**
 9. **Jev is strongest in English.** Track routing on Dutch turns separately in the shadow log.
 
 ## Caveats measured by others

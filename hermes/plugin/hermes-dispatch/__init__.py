@@ -120,8 +120,8 @@ def _log(entry: Dict[str, Any]) -> None:
         pass
 
 
-_JEV_KEPT = ("call", "error", "latency_ms", "via", "model", "read", "tier", "specialty", "confidence",
-             "difficulty", "stakes")
+_JEV_KEPT = ("call", "error", "latency_ms", "via", "model", "build", "cost", "read", "tier", "specialty",
+             "confidence", "difficulty", "stakes")
 
 
 def _summary(decision: Dict[str, Any]) -> Dict[str, Any]:

@@ -466,7 +466,7 @@ def _apply_locked(hermes_home: str, changes: Dict[str, Any], backup_root: Option
 
 _EVENT_FIELDS = ("ts", "profile", "mode", "live", "agent", "model", "reason", "downgraded", "privacy",
                  "privacy_why", "would_send_chars", "chat_model", "api_mode", "handed_over")
-_JEV_FIELDS = ("call", "error", "latency_ms", "via", "model", "read", "tier", "specialty", "confidence")
+_JEV_FIELDS = ("call", "error", "latency_ms", "via", "model", "build", "read", "tier", "specialty", "confidence")
 
 
 def _outcome(row: Dict[str, Any]) -> str:

@@ -1,8 +1,9 @@
 """One Jev request for two decisions: how to route this turn, and which skill it needs.
 
 A Hermes turn pays two round trips before the model runs — skill selection on the pre-call
-hook, routing on the request hook. Jev charges per request, not per question, so the two are
-asked together here and each answer is handed back to the module that owns its policy:
+hook, routing on the request hook. Here they are asked together, in one round trip instead of
+two; Jev bills input tokens, about $0.00002 a call, so the saving is time rather than money.
+Each answer is handed back to the module that owns its policy:
 `route.decide(answers=...)` and `skillpick.pick(stage_one=...)`. Neither module's thresholds,
 floors or fail-open paths change; only the number of round trips does.
 

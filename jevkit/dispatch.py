@@ -448,6 +448,9 @@ def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], 
         answers = reply["answers"]
         call = {"call": "called", "latency_ms": reply.get("latency_ms"), "via": reply.get("via"),
                 "model": reply.get("model"), "read": read}
+        # The build that answered, beside the alias asked for: thresholds are tuned to one build,
+        # and `jev-latest` moves. The cost only when the provider reports it.
+        call.update({key: reply[key] for key in ("build", "cost") if reply.get(key) not in (None, "")})
     else:
         call = {"call": "given", "read": read}          # bought elsewhere: `jev dispatch --answers`, tests
     incomplete = {**record, "source": "fail_open", "why": "routing answers incomplete",

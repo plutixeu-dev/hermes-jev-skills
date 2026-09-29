@@ -70,6 +70,14 @@ class KeysStoreTests(unittest.TestCase):
         self.assertIsInstance(out["latency_ms"], int)
         self.assertNotIn(KEY, json.dumps(out))
 
+    def test_a_passed_check_names_the_build_that_answered(self):
+        def wire(body, headers, timeout):
+            return json.dumps({"model": "typesafe/jev-1.13-20260917",
+                               "answers": {"ok": {"type": "noul", "noul": 0.97}}}).encode()
+        self.env(self.home, "OPENROUTER_API_KEY=%s\n" % KEY)
+        out = ks.check(self.home, "openrouter", transport=wire)
+        self.assertEqual((out["model"], out["build"]), (client.OPENROUTER_MODEL, "typesafe/jev-1.13-20260917"))
+
     def test_check_reports_the_code_and_does_not_retry(self):
         calls = []
 
