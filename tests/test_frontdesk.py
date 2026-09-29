@@ -59,5 +59,18 @@ class PinTests(unittest.TestCase):
         self.assertFalse(frontdesk.is_pinned("", "custom", OLLAMA))
 
 
+class DeskModeTests(unittest.TestCase):
+    def test_the_switch_file_wins_then_config_yaml_then_dispatch_json(self):
+        self.assertEqual(frontdesk.desk_mode({"mode": "shadow"}, "on", {"mode": "off"}), "shadow")
+        self.assertEqual(frontdesk.desk_mode({}, "on", {"mode": "off"}), "on")
+        self.assertEqual(frontdesk.desk_mode({}, None, {"mode": "shadow"}), "shadow")
+        self.assertEqual(frontdesk.desk_mode(None, None, None), "off")
+
+    def test_anything_else_is_off(self):
+        """A bare YAML `on` arrives as True; the plugin has always read that as off."""
+        self.assertEqual(frontdesk.desk_mode({}, True, {}), "off")
+        self.assertEqual(frontdesk.desk_mode({"mode": "aan"}, None, {}), "off")
+
+
 if __name__ == "__main__":
     unittest.main()

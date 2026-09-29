@@ -4,6 +4,7 @@ The plugin module is loaded from the repo and its Jev call is replaced with a sp
 so these tests never touch the network, the real decision log or the real key.
 """
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -44,6 +45,7 @@ class RoutingMiddlewareTests(unittest.TestCase):
         for patch in (
             mock.patch.object(plugin, "_setting", lambda name, default: "on" if name == "routing" else default),
             mock.patch.object(plugin, "_hermes_config", lambda: {"model": {"provider": "openrouter", "default": DEFAULT}}),
+            mock.patch.object(plugin, "_front_desk_active", lambda: False),
             mock.patch.object(plugin, "_log", self.logs.append),
             mock.patch.object(plugin.route, "decide", side_effect=fake_decide),
         ):
@@ -164,6 +166,7 @@ class MergedRequestTests(unittest.TestCase):
             mock.patch.object(plugin.skillpick, "pick", side_effect=fake_pick),
             mock.patch.object(plugin.turn, "decide_turn", side_effect=fake_merge),
             mock.patch.object(plugin.route, "decide", side_effect=fake_decide),
+            mock.patch.object(plugin, "_front_desk_active", lambda: False),
         ):
             patch.start()
             self.addCleanup(patch.stop)
@@ -201,6 +204,80 @@ class MergedRequestTests(unittest.TestCase):
         self.assertEqual(self.picks, [], "skill selection is not re-asked inside the same failure")
         self.assertEqual(self.decisions[0]["answers"], None)
         self.assertEqual(plugin._TURNS["s-merge"]["route_answers"], None)
+
+
+class FrontDeskTests(unittest.TestCase):
+    """In a profile whose front desk is in shadow or on, routing asks Jev nothing and swaps nothing."""
+
+    def setUp(self):
+        plugin._TURNS.clear()
+        self.decisions, self.merges = [], []
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name)
+        receptionist = {"model": {"provider": "custom", "default": "qwen3.5:4b"}}
+
+        def decide(prompt, **kwargs):
+            self.decisions.append(kwargs)
+            return {"routed": True, "model": "custom:x", "model_id": "x"}
+
+        for patch in (
+            mock.patch.dict(os.environ, {"HERMES_HOME": str(self.home),
+                                         "JEV_DISPATCH_POLICY": str(self.home / "dispatch.json")}),
+            mock.patch.object(plugin, "_setting", lambda name, default: "on"),
+            mock.patch.object(plugin, "_hermes_config", lambda: receptionist),
+            mock.patch.object(plugin, "_log", lambda entry: None),
+            mock.patch.object(plugin, "_skill_roots", lambda: []),
+            mock.patch.object(plugin.skillpick, "discover", lambda roots, **kw: []),
+            mock.patch.object(plugin.skillpick, "pick", lambda *a, **k: {"status": "ok", "skills": []}),
+            mock.patch.object(plugin.turn, "decide_turn",
+                              side_effect=lambda *a, **k: self.merges.append(a) or {"status": "fail_open"}),
+            mock.patch.object(plugin.route, "decide", side_effect=decide),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def desk(self, mode):
+        path = self.home / "jev" / "dispatch-state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"mode": mode}))
+
+    def turn(self, session="s1"):
+        plugin._on_pre_llm_call(session_id=session, turn_id="t1", user_message=HARD)
+        return plugin._on_llm_request(request={"model": "qwen3.5:4b", "messages": []}, session_id=session,
+                                      turn_id="t1", model="qwen3.5:4b", provider="custom")
+
+    def test_routing_asks_nothing_and_swaps_nothing_while_the_front_desk_decides(self):
+        for mode in ("shadow", "on"):
+            self.desk(mode)
+            self.assertIsNone(self.turn(session=mode))
+        self.assertEqual((self.decisions, self.merges), ([], []))
+
+    def test_with_the_front_desk_off_routing_decides_as_before(self):
+        self.desk("off")
+        self.turn()
+        self.assertEqual(len(self.decisions), 1)
+
+    def test_a_switch_left_by_a_removed_dispatch_plugin_silences_nothing(self):
+        self.desk("on")
+        ctx = types.SimpleNamespace(has_plugin=lambda name: name != "hermes-dispatch", get_config=lambda n, d=None: d)
+        with mock.patch.object(plugin, "_CTX", ctx):
+            self.turn()
+        self.assertEqual(len(self.decisions), 1)
+
+    def test_config_yaml_and_dispatch_json_set_the_front_desk_too(self):
+        on_in_yaml = {"model": {"provider": "custom", "default": "qwen3.5:4b"},
+                      "plugins": {"entries": {"hermes-dispatch": {"settings": {"mode": "on"}}}}}
+        with mock.patch.object(plugin, "_hermes_config", lambda: on_in_yaml):
+            self.assertIsNone(self.turn(session="yaml"))
+        (self.home / "dispatch.json").write_text(json.dumps({"mode": "shadow"}))
+        self.assertIsNone(self.turn(session="json"))
+        self.assertEqual(self.decisions, [])
+
+    def test_the_status_says_routing_stands_aside(self):
+        self.desk("on")
+        with mock.patch.object(plugin.keystore, "describe", lambda: {"present": True}):   # never the real store
+            self.assertIn("front desk decides", plugin._jev_command(""))
 
 
 class ProfileTests(unittest.TestCase):

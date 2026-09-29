@@ -78,3 +78,15 @@ def is_pinned(model: Any, provider: Any, config: Any) -> bool:
     chat = bare_model(model, providers)
     named = [desk["model"]] + [entry["model"] for entry in desk["fallbacks"]]
     return all(bare_model(name, providers) != chat for name in named)
+
+
+def desk_mode(state: Any, config_value: Any, policy: Any) -> str:
+    """hermes-dispatch's mode for one profile, read the way that plugin reads it: its switch
+    (`<home>/jev/dispatch-state.json`), then its setting in config.yaml, then `mode` in
+    dispatch.json, then off. A value that is not off, shadow or on reads as off."""
+    for value in ((state if isinstance(state, Mapping) else {}).get("mode"), config_value,
+                  (policy if isinstance(policy, Mapping) else {}).get("mode")):
+        if value is not None:
+            value = str(value).lower()
+            return value if value in MODES else "off"
+    return "off"

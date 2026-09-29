@@ -72,7 +72,6 @@ class MiddlewareTests(unittest.TestCase):
 
         for patch in (mock.patch.dict(os.environ, {"HERMES_HOME": self.home.name}),
                       mock.patch.object(plugin, "_log", self.logs.append),
-                      mock.patch.object(plugin, "_hermes_jev_routing", return_value=None),   # never a real config.yaml
                       mock.patch.object(plugin.dispatch, "load_policy", lambda *a, **k: self.policy),
                       mock.patch.object(plugin.dispatch, "dispatch_turn", side_effect=fake_turn)):
             patch.start()
@@ -136,37 +135,24 @@ class MiddlewareTests(unittest.TestCase):
         self.assertEqual(self.call(session="s2", platform="cron")[1].calls, 1)
         self.assertEqual(self.dispatched, [])
 
-    def test_one_classifier_per_turn_while_jev_routing_is_on(self):
-        self.mode("on")
-        state = Path(self.home.name) / "jev" / "state.json"
-        state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(json.dumps({"routing": "shadow"}))
-        result, following = self.call()
-        self.assertEqual((result, following.calls, self.dispatched), ("LOCAL-RESPONSE", 1, []))
-        self.assertIn("one classifier", self.logs[-1]["reason"])
-
-    def test_a_stale_jev_switch_stands_nothing_aside_once_hermes_jev_is_gone(self):
+    def test_routing_switched_on_no_longer_stops_the_front_desk(self):
+        """2026-09-29 20:57:09: routing was on, so dispatch stood aside, and routing (pinned by
+        mistake) asked nobody. The front desk now goes first; routing stands aside for it."""
         self.mode("on")
         state = Path(self.home.name) / "jev" / "state.json"
         state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text(json.dumps({"routing": "on"}))
-        with mock.patch.object(plugin, "_CTX", FakeCtx(loaded=["hermes-dispatch"])):
-            self.assertEqual(self.call(session="gone")[1].calls, 0)
-        self.assertEqual(len(self.dispatched), 1)
+        with mock.patch.object(plugin, "_CTX", FakeCtx(loaded=["hermes-jev", "hermes-dispatch"])):
+            result, following = self.call()
+        self.assertEqual((following.calls, len(self.dispatched)), (0, 1))
+        self.assertNotIn("stood aside", json.dumps(self.logs))
+        self.assertFalse(hasattr(plugin, "_jev_routing_active"))
 
-    def test_while_hermes_jev_is_loaded_or_cannot_be_asked_dispatch_stands_aside(self):
-        self.mode("on")
-        state = Path(self.home.name) / "jev" / "state.json"
-        state.parent.mkdir(parents=True, exist_ok=True)
-        state.write_text(json.dumps({"routing": "shadow"}))
-
-        def broken(plugin_id):
-            raise RuntimeError("no registry")
-
-        for index, ctx in enumerate((FakeCtx(loaded=["hermes-jev"]), FakeCtx(probe=None), FakeCtx(probe=broken))):
-            with mock.patch.object(plugin, "_CTX", ctx):
-                self.assertEqual(self.call(session=f"s{index}")[1].calls, 1)
-        self.assertEqual(self.dispatched, [])
+    def test_a_bare_yaml_on_is_off_as_documented(self):
+        self.mode("off")
+        with mock.patch.object(plugin, "_plugin_setting", lambda name: True if name == "mode" else None):
+            result, following = self.call()
+        self.assertEqual((result, following.calls, self.dispatched), ("LOCAL-RESPONSE", 1, []))
 
     def test_a_switch_file_that_is_not_utf8_is_no_switch(self):
         self.mode("on")
@@ -202,12 +188,6 @@ class MiddlewareTests(unittest.TestCase):
         self.call(turn="t1")
         self.call(turn="t2")
         self.assertEqual(self.dispatched[1]["session"], "sess-7")
-
-    def test_routing_switched_on_in_config_yaml_also_counts(self):
-        self.mode("on")
-        with mock.patch.object(plugin, "_hermes_jev_routing", return_value="on"):
-            result, following = self.call()
-        self.assertEqual((result, following.calls, self.dispatched), ("LOCAL-RESPONSE", 1, []))
 
     def test_config_yaml_sets_the_mode_when_no_switch_was_used(self):
         self.mode("off")

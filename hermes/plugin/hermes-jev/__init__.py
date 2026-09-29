@@ -19,7 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .jevkit import catalog, choose, compact, frontdesk, keystore, ladder, rerank, route, search, skillpick, supervise, turn
+from .jevkit import (catalog, choose, compact, dispatch, frontdesk, keystore, ladder, rerank, route, search,
+                     skillpick, supervise, turn)
 
 _LOCK = threading.Lock()
 _TURNS: Dict[str, Dict[str, Any]] = {}      # session_id -> the current turn's text and decision
@@ -103,6 +104,42 @@ def _hermes_config() -> Dict[str, Any]:
         return config if isinstance(config, dict) else {}
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _dispatch_setting(name: str) -> Any:
+    """hermes-dispatch's own setting in this profile's config.yaml (`plugins.entries.hermes-dispatch
+    .settings`, or Hermes's legacy `.config`), or None."""
+    plugins = _hermes_config().get("plugins")
+    entries = plugins.get("entries") if isinstance(plugins, dict) else None
+    entry = entries.get("hermes-dispatch") if isinstance(entries, dict) else None
+    for section in ("settings", "config"):
+        block = entry.get(section) if isinstance(entry, dict) else None
+        if isinstance(block, dict) and block.get(name) is not None:
+            return block[name]
+    return None
+
+
+def _front_desk_active() -> bool:
+    """Is this profile's front desk (hermes-dispatch) in shadow or on.
+
+    Then the front desk asks Jev about the turn and picks who answers, so routing asks nothing and
+    swaps nothing: one classifier per turn, the front desk's. Until 2026-09-29 dispatch gave way
+    instead, and with routing pinned by mistake nobody asked Jev at all. Only while
+    hermes-dispatch is loaded: a switch left behind by a removed plugin must not silence routing.
+    A Hermes that cannot say is taken to have it.
+    """
+    probe = getattr(_CTX, "has_plugin", None)
+    if callable(probe):
+        try:
+            if not probe("hermes-dispatch"):
+                return False
+        except Exception:  # noqa: BLE001 - unsure: read its switch
+            pass
+    try:
+        return frontdesk.desk_mode(_read(_home() / "jev" / "dispatch-state.json"), _dispatch_setting("mode"),
+                                   dispatch.load_policy()) in ("shadow", "on")
+    except Exception:  # noqa: BLE001 - settings nobody can read: routing goes on as before
+        return False
 
 
 def _disabled_skills() -> Any:
@@ -192,14 +229,18 @@ def _reachable_skill(name: str) -> Optional[str]:
 
 def _on_pre_llm_call(session_id: str = "", turn_id: Any = None, user_message: Any = "", **_: Any) -> Any:
     text = user_message if isinstance(user_message, str) else json.dumps(user_message, default=str)[:6000]
+    routing_mode = _setting("routing", "off")
+    # Read once per turn, and only when routing would act: then the front desk decides this turn instead.
+    front_desk = routing_mode in ("on", "shadow") and _front_desk_active()
     with _LOCK:
         if len(_TURNS) >= _MAX_SESSIONS:
             _TURNS.pop(next(iter(_TURNS)))
-        _TURNS[session_id or "-"] = {"turn_id": turn_id, "text": text, "decision": None, "route_answers": None}
+        _TURNS[session_id or "-"] = {"turn_id": turn_id, "text": text, "decision": None, "route_answers": None,
+                                     "front_desk": front_desk}
     if not text.strip():
         return None
     skills_on = _setting("skills", "off") == "on"
-    routing_on = _setting("routing", "off") in ("on", "shadow")
+    routing_on = routing_mode in ("on", "shadow") and not front_desk
     skills = skillpick.discover(_skill_roots(), disabled=_disabled_skills()) if skills_on else []
     picked = None
     if skills_on and routing_on and _setting("merge_requests", "on") == "on":
@@ -250,6 +291,8 @@ def _on_llm_request(request: Optional[Dict[str, Any]] = None, session_id: str = 
         turn = _TURNS.get(session_id or "-")
     if not turn or turn["turn_id"] != turn_id:
         return None
+    if turn.get("front_desk"):
+        return None            # the front desk classifies this turn and picks who answers; routing stays out
     decision = turn["decision"]
     if decision is None:                       # first API call of this turn: ask Jev exactly once
         catalog_provider = catalog.HERMES_ALIASES.get(provider, provider)
@@ -447,7 +490,9 @@ def _jev_command(raw_args: str = "") -> str:
     key = keystore.describe()
     tiers = route.load_config().get("tiers") or {}
     lines = [f"Jev key: {'present' if key['present'] else 'MISSING (run `jev setup-key` on this machine)'}",
-             f"routing: {_setting('routing', 'off')} · skills: {_setting('skills', 'off')} · notice: {_setting('notice', 'off')}",
+             f"routing: {_setting('routing', 'off')}"
+             f"{' (stands aside: the front desk decides here)' if _front_desk_active() else ''}"
+             f" · skills: {_setting('skills', 'off')} · notice: {_setting('notice', 'off')}",
              f"tiers configured: {', '.join(sorted(tiers)) or 'none (run `jev models suggest --write`)'}",
              "usage: /jev routing on|shadow|off [all] · /jev skills on|off [all] · /jev notice on|off [all]"]
     return "\n".join(lines)

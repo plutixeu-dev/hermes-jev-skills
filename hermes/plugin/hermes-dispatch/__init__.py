@@ -11,8 +11,8 @@ Shadow decides and logs, and always lets the local call go ahead. Only a `chat_c
 provider is ever short-circuited, because that is the response shape this plugin builds.
 Everything fails open: any error in here is a local answer, never a lost turn.
 
-One classifier per turn: while hermes-jev is loaded and `/jev routing` is on or in shadow, this
-plugin stands aside.
+One classifier per turn, and it is this plugin's: in a profile whose front desk is in shadow or on,
+hermes-jev routing asks nothing and swaps nothing (see jevkit/frontdesk.py).
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from .jevkit import dispatch
+from .jevkit import dispatch, frontdesk
 
 _LOCK = threading.Lock()
 _TURNS: Dict[str, Dict[str, Any]] = {}      # session -> this turn's text, clean history and decision
@@ -92,46 +92,10 @@ def _setting(name: str, policy: Dict[str, Any], default: str) -> str:
     return str(value if value is not None else default).lower()
 
 
-def _hermes_jev_routing() -> Any:
-    """hermes-jev's `routing` in config.yaml, where Hermes keeps plugin settings, or None."""
-    try:
-        from hermes_cli.config import load_config_readonly  # type: ignore
-
-        config = load_config_readonly() or {}
-        entry = config.get("plugins", {}).get("entries", {}).get("hermes-jev", {})
-        for section in ("settings", "config"):             # `config` is Hermes's legacy spelling
-            value = (entry.get(section) or {}).get("routing")
-            if value is not None:
-                return value
-    except Exception:  # noqa: BLE001 - outside Hermes, or a config shaped some other way
-        return None
-    return None
-
-
-def _hermes_jev_loaded() -> bool:
-    """Is hermes-jev loaded and enabled here. A Hermes that cannot say is taken to have it."""
-    probe = getattr(_CTX, "has_plugin", None)
-    if not callable(probe):
-        return True
-    try:
-        return bool(probe("hermes-jev"))
-    except Exception:  # noqa: BLE001 - unsure means the other classifier may be running
-        return True
-
-
-def _jev_routing_active() -> bool:
-    """hermes-jev's routing, read the way that plugin reads it: a `/jev` switch, then config.yaml.
-
-    Only while hermes-jev is loaded: a `/jev routing on` left behind by a removed plugin must not
-    silence dispatch forever.
-    """
-    if not _hermes_jev_loaded():
-        return False
-    state = {**_read(_root() / "jev" / "state.json"), **_read(_home() / "jev" / "state.json")}
-    value = state.get("routing")
-    if value is None:
-        value = _hermes_jev_routing()
-    return str(value or "off").lower() in ("on", "shadow")
+def _mode(policy: Dict[str, Any]) -> str:
+    """off, shadow or on: `/dispatch` (or the dashboard) wins, then config.yaml, then dispatch.json.
+    The same rule hermes-jev reads to stand aside (jevkit.frontdesk.desk_mode), so the two never disagree."""
+    return frontdesk.desk_mode(_read(_state_path()), _plugin_setting("mode"), policy)
 
 
 def _middleware_available() -> bool:
@@ -280,7 +244,7 @@ def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: st
                       api_mode: str = "", **_: Any) -> Any:
     try:
         policy = dispatch.load_policy()
-        mode = _setting("mode", policy, "off")
+        mode = _mode(policy)
     except Exception:  # noqa: BLE001 - settings that cannot be read dispatch nothing
         return next_call(request)
     if mode not in ("shadow", "on") or not isinstance(request, dict):
@@ -296,9 +260,6 @@ def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: st
     text = turn["text"]
     if turn["platform"] in (policy.get("skip_platforms") or []) or any(
             text.lstrip().startswith(prefix) for prefix in (policy.get("skip_prefixes") or [])):
-        return next_call(request)
-    if _jev_routing_active():
-        _log({"mode": mode, "agent": dispatch.LOCAL, "reason": "stood aside: /jev routing is on (one classifier per turn)"})
         return next_call(request)
     live = mode == "on" and api_mode == "chat_completions"
     try:
@@ -331,7 +292,7 @@ def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: st
 def _on_transform_output(response_text: str = "", session_id: str = "", turn_id: Any = None, **_: Any) -> Any:
     """Say it when a turn that deserved another agent was answered here. Once per turn."""
     policy = dispatch.load_policy()
-    if _setting("notice", policy, "off") != "on" or _setting("mode", policy, "off") != "on":
+    if _setting("notice", policy, "off") != "on" or _mode(policy) != "on":
         return None
     with _LOCK:
         key = session_id or "-"
@@ -361,7 +322,7 @@ def _dispatch_command(raw_args: str = "") -> str:
     policy = dispatch.load_policy()
     report = dispatch.check_agents(policy)
     klass = dispatch.privacy_class("", profile=_profile(), policy=policy)[0]    # what a turn here really gets
-    lines = [f"dispatch: {_setting('mode', policy, 'off')} · notice: {_setting('notice', policy, 'off')} · "
+    lines = [f"dispatch: {_mode(policy)} · notice: {_setting('notice', policy, 'off')} · "
              f"profile {_profile()} is {klass}"]
     if not _middleware_available():
         lines.append("  this Hermes has no llm_execution middleware: dispatch cannot act here; update Hermes")
