@@ -76,7 +76,7 @@ JEV_MODE = {
             "Press Live to watch decisions as they happen. Inside Hermes the same switch is /jev routing on|shadow|off.",
 }
 
-_SAFE_PROVIDER = re.compile(r"^[A-Za-z0-9._\-]*$")
+_SAFE_PROVIDER = re.compile(r"^(custom:)?[A-Za-z0-9._\-]*$")
 _SAFE_MODEL = re.compile(r"^[A-Za-z0-9._\-/:@+]*$")
 
 
@@ -489,17 +489,74 @@ def local_models(hermes_home: str) -> dict[str, Any]:
 # ------------------------------------------------------------------- writing
 
 
+_SAFE_URL = re.compile(r"^https?://[A-Za-z0-9.\-]+(:\d{1,5})?/v1$")
+_MAIN_READ = {"provider": "provider", "default": "model", "base_url": "base_url"}
+
+
+def _check_url(value: str) -> str:
+    value = (value or "").strip()
+    if "\n" in value or "\r" in value or not _SAFE_URL.match(value):
+        raise ValueError(f"base_url must look like http://host:port/v1: {value!r}")
+    if not ollama.private_url(value):
+        raise ValueError(f"base_url must be a loopback or private address: {value!r}")
+    return value
+
+
+def _named_provider_at(data: dict[str, Any], server: str) -> str:
+    """`custom:<name>` for the first providers:/custom_providers: entry served from `server`, or "".
+
+    Only a name `_SAFE_PROVIDER` accepts is offered: it is written into config.yaml as a plain scalar."""
+    candidates = []
+    named = data.get("providers")
+    for name, entry in (named.items() if isinstance(named, dict) else []):
+        if isinstance(entry, dict):
+            candidates.append((f"custom:{name}", entry))
+    legacy = data.get("custom_providers")
+    for entry in (legacy if isinstance(legacy, list) else []):
+        if isinstance(entry, dict) and entry.get("name"):
+            candidates.append(("custom:" + str(entry["name"]).strip().lower().replace(" ", "-"), entry))
+    for provider, entry in candidates:
+        if _SAFE_PROVIDER.match(provider) and ollama.same_server(_entry_url(entry), server):
+            return provider
+    return ""
+
+
+def _main_targets(config_path: str, current: dict[str, str], main: dict[str, Any]) -> list[tuple[str, str]]:
+    """(key, value) for model.provider, model.default and model.base_url after a main-model change.
+
+    `local: true`: the model is one of this machine's Ollama models, and the provider and base_url
+    follow from where that server is (spec part 1a). Moving a profile off a local server clears a
+    local base_url, because Hermes honours model.base_url for other providers too.
+    """
+    provider = _check_safe(main.get("provider", current["provider"]), "provider")
+    model = _check_safe(main.get("model", current["model"]), "model")
+    base_url = current["base_url"]
+    desk = receptionist(config_path)
+    if main.get("local") is True:
+        server = ollama.base_url(desk["endpoint"] or None)
+        if not ollama.private_url(server):
+            raise ValueError(f"the Ollama server {server} is not a loopback or private address")
+        if ollama.same_server(desk["endpoint"], server):
+            provider = current["provider"]                    # already served from it: keep the provider
+        else:
+            provider = _named_provider_at(_yaml(config_path), server) or LOCAL_PROVIDER
+            if provider == LOCAL_PROVIDER or (base_url and not ollama.same_server(base_url, server)):
+                base_url = server + "/v1"
+    elif provider != current["provider"] and base_url and ollama.private_url(base_url):
+        base_url = ""
+    if base_url and base_url != current["base_url"]:
+        base_url = _check_url(base_url)
+    return [("provider", provider), ("default", model), ("base_url", base_url)]
+
+
 def plan(config_path: str, changes: dict[str, dict[str, str]]) -> list[dict[str, str]]:
     """Compute before/after rows for the UI preview without writing anything."""
     before = read_config(config_path)
     rows: list[dict[str, str]] = []
     main = changes.get("__main__")
     if main:
-        for field_name, key, old in (
-            ("provider", "provider", before["main"]["provider"]),
-            ("model", "default", before["main"]["model"]),
-        ):
-            new = _check_safe(main.get(field_name, old), field_name)
+        for key, new in _main_targets(config_path, before["main"], main):
+            old = before["main"][_MAIN_READ[key]]
             if new != old:
                 rows.append({"scope": "__main__", "field": key, "before": old, "after": new})
     for slot_key, spec in changes.items():
@@ -547,12 +604,10 @@ def _apply_changes_locked(hermes_home: str, rp: str, changes: dict[str, dict[str
     with open(rp, "r", encoding="utf-8") as fh:
         text = fh.read()
 
-    main = changes.get("__main__")
-    if main:
-        if "provider" in main:
-            text = _set_scalar(text, "model", "provider", _check_safe(main["provider"], "provider"))
-        if "model" in main:
-            text = _set_scalar(text, "model", "default", _check_safe(main["model"], "model"))
+    # The main rows come from the plan: that is where the provider and base_url of a local pick are decided.
+    for row in rows:
+        if row["scope"] == "__main__":
+            text = _set_scalar(text, "model", row["field"], row["after"])
     for slot_key, spec in changes.items():
         if slot_key == "__main__":
             continue
@@ -571,7 +626,7 @@ def _apply_changes_locked(hermes_home: str, rp: str, changes: dict[str, dict[str
     mismatches = []
     for row in rows:
         if row["scope"] == "__main__":
-            got = after["main"]["provider" if row["field"] == "provider" else "model"]
+            got = after["main"][_MAIN_READ[row["field"]]]
         else:
             got = after["slots"].get(row["scope"], {}).get(row["field"], "")
         if got != row["after"]:

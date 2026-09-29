@@ -183,6 +183,66 @@ class StoreTestCase(unittest.TestCase):
         self.assertEqual(rs.receptionist(path)["endpoint"], "http://10.0.0.5:11434/v1")
 
 
+class LocalReceptionistTests(unittest.TestCase):
+    """`{"__main__": {"model": ..., "local": true}}`: the provider and base_url follow from where Ollama is."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.home = self.tmp.name
+        self.path = os.path.join(self.home, "config.yaml")
+        env = mock.patch.dict(os.environ, {"OLLAMA_HOST": ""})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def config(self, text):
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def rows(self, main):
+        return {(r["field"], r["after"]) for r in rs.plan(self.path, {"__main__": main})}
+
+    def test_a_profile_already_on_ollama_only_changes_the_model(self):
+        self.config("model:\n  provider: custom\n  default: qwen3.5:4b\n  base_url: http://127.0.0.1:11434/v1\n")
+        self.assertEqual(self.rows({"model": "qwen3.6:27b", "local": True}), {("default", "qwen3.6:27b")})
+
+    def test_a_named_local_provider_is_reused(self):
+        self.config("model:\n  provider: openai-codex\n  default: gpt-5.5\n"
+                    "providers:\n  local-ollama-cpu:\n    api: http://127.0.0.1:11434/v1\n")
+        self.assertEqual(self.rows({"model": "qwen3.5:4b", "local": True}),
+                         {("provider", "custom:local-ollama-cpu"), ("default", "qwen3.5:4b")})
+
+    def test_an_openrouter_profile_gets_custom_and_the_ollama_base_url(self):
+        self.config("model:\n  provider: openrouter\n  default: x/y\n  base_url: https://openrouter.ai/api/v1\n")
+        self.assertEqual(self.rows({"model": "qwen3.5:4b", "local": True}),
+                         {("provider", "custom"), ("default", "qwen3.5:4b"),
+                          ("base_url", "http://127.0.0.1:11434/v1")})
+
+    def test_leaving_ollama_clears_the_local_base_url(self):
+        """Hermes honours model.base_url for openai-codex too: a local one would capture the ChatGPT login."""
+        self.config("model:\n  provider: custom\n  default: qwen3.5:4b\n  base_url: http://127.0.0.1:11434/v1\n")
+        self.assertEqual(self.rows({"provider": "openai-codex", "model": "gpt-5.5"}),
+                         {("provider", "openai-codex"), ("default", "gpt-5.5"), ("base_url", "")})
+
+    def test_a_public_ollama_host_is_refused(self):
+        self.config("model:\n  provider: openrouter\n  default: x/y\n")
+        with mock.patch.dict(os.environ, {"OLLAMA_HOST": "8.8.8.8"}):
+            with self.assertRaises(ValueError):
+                rs.plan(self.path, {"__main__": {"model": "qwen3.5:4b", "local": True}})
+
+    def test_apply_writes_base_url_keeps_comments_and_reads_back(self):
+        self.config("# mine\nmodel:\n  provider: openrouter  # was\n  default: x/y\n")
+        target = rs.discover_targets(self.home)[0]
+        receipt = rs.apply_changes(self.home, target.path, {"__main__": {"model": "qwen3.5:4b", "local": True}})
+        self.assertTrue(receipt["verified"], receipt)
+        with open(self.path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("# mine", text)
+        self.assertIn("base_url: http://127.0.0.1:11434/v1", text)
+        self.assertEqual(rs.read_config(self.path)["main"],
+                         {"provider": "custom", "model": "qwen3.5:4b", "base_url": "http://127.0.0.1:11434/v1"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
