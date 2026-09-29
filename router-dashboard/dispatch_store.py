@@ -489,9 +489,11 @@ def _outcome(row: Dict[str, Any]) -> str:
 
 def _window(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     """The rows on screen in a few numbers: how often Jev was called, failed or not asked, who answered,
-    and Jev's mean latency. Enough to see at a glance that the chain works, or where it breaks."""
+    Jev's mean latency, and which builds answered. Enough to see at a glance that the chain works, or
+    where it breaks. Two builds in one window means `jev-latest` moved under thresholds tuned to one."""
     calls: Dict[str, int] = {}
     outcomes: Dict[str, int] = {}
+    builds: Dict[str, int] = {}
     latencies = []
     for event in events:
         call = str(event["jev"].get("call") or "unknown")
@@ -500,8 +502,11 @@ def _window(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         latency = event["jev"].get("latency_ms")
         if isinstance(latency, (int, float)) and not isinstance(latency, bool):
             latencies.append(latency)
+        build = event["jev"].get("build")
+        if isinstance(build, str) and build:
+            builds[build] = builds.get(build, 0) + 1
     return {"turns": len(events), "jev": calls, "outcomes": outcomes,
-            "latency_ms": round(sum(latencies) / len(latencies)) if latencies else None}
+            "latency_ms": round(sum(latencies) / len(latencies)) if latencies else None, "builds": builds}
 
 
 def live(hermes_home: str, since: float = 0.0, limit: int = 100) -> Dict[str, Any]:

@@ -78,36 +78,83 @@ class ServerTestCase(unittest.TestCase):
         self.assertIn("Hermes Model Routing", html)
         self.assertIn("Apply changes", html)
 
-    def test_page_has_the_dispatch_card_marked_new_in_this_fork(self):
+    def page(self):
         with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=10) as resp:
-            html = resp.read().decode()
+            return resp.read().decode()
+
+    def function(self, name):
+        """One top-level function of the page's script, up to its closing brace."""
+        body = self.page()
+        body = body[body.find(name):]
+        return body[:body.find("\n}\n")]
+
+    def test_page_has_one_front_desk_card_and_a_keys_card_marked_new(self):
+        html = self.page()
         # assertTrue, not assertIn: a miss would print the whole page.
-        for name in ("dispatchCard", "dispatchNew", "dispSeg", "dispConflict", "dispNotice", "dispPrivacy",
-                     "dispAgents", "dispOrder", "dispChecks", "dispPreview", "dispReceipt", "dispLive"):
+        for name in ("dispatchCard", "dispatchNew", "deskReceptionist", "deskWarn", "deskHealth", "dispSeg",
+                     "dispNotice", "dispPrivacy", "dispAgents", "dispOrder", "dispChecks", "dispPreview", "dispReceipt",
+                     "dispLive", "keysCard", "keysNew", "keysRoute", "keysWarn", "keysBody", "localBox", "jevDesk"):
             with self.subTest(id=name):
                 self.assertTrue('id="%s"' % name in html, "the page has no element with id=%s" % name)
-        for text in ("new in this fork", "Added in this fork: the upstream hermes-jev-skills has no dispatch."):
+        self.assertFalse('id="dispConflict"' in html, "the front desk goes first: no 'turn routing off' note")
+        for text in ("new in this fork", "Added in this fork: the upstream hermes-jev-skills has no front desk."):
             with self.subTest(text=text):
                 self.assertTrue(text in html, "the page does not say: %s" % text)
-        jev, card, pools = (html.find('id="%s"' % name) for name in ("jevCard", "dispatchCard", "poolCard"))
-        self.assertTrue(0 <= jev < card < pools, "the dispatch card sits right after the Jev routing card")
+        jev, desk, keys, pools = (html.find('id="%s"' % n) for n in ("jevCard", "dispatchCard", "keysCard", "poolCard"))
+        self.assertTrue(0 <= jev < desk < keys < pools, "Jev routing, then Front desk, then Keys, then the pools")
         # The page offers Claude's model aliases from its own copy of the store's list.
         claude_models = "const CLAUDE_MODELS = %s;" % json.dumps(list(ds.CLAUDE_MODELS))
         self.assertTrue(claude_models in html, "the page's CLAUDE_MODELS differs from dispatch_store's")
 
+    def test_every_desk_warning_the_store_can_give_has_words_on_the_page(self):
+        html = self.page()
+        for code in ("no_receptionist", "privacy_only_here", "features_only", "no_agent", "no_jev_key", "no_handover"):
+            with self.subTest(code=code):
+                self.assertTrue("  %s: \"" % code in html, "DESK_WARN has no text for %s" % code)
+
+    def test_a_key_field_is_cleared_before_the_request_goes(self):
+        body = self.function("async function keySave")
+        self.assertTrue(0 <= body.find('input.value = ""') < body.find("/api/keys/save"), body)
+
+    def test_a_failed_key_check_says_what_the_code_means(self):
+        html = self.page()
+        for code, text in (("auth_failed", "the key was refused"), ("forbidden", "the key may not use this model"),
+                           ("credits_exhausted", "no credit left"), ("rate_limited", "rate limited, try again in a minute"),
+                           ("timeout", "Jev could not be reached from this machine"),
+                           ("http_404", "this model id is not served (jev-latest moved?)"), ("no_key", "no key stored")):
+            with self.subTest(code=code):
+                self.assertTrue('%s: "%s"' % (code, text) in html, "KEY_ERROR does not explain %s" % code)
+        self.assertTrue("r.build" in self.function("async function keyCheck"), "a passed check does not show the build")
+
+    def test_the_live_row_marks_a_silent_receptionist(self):
+        body = self.function("function dispLiveRow")
+        for text in ("receptionist_warning", "warnrow", "not_handed_over", "fail-open", "not called"):
+            with self.subTest(text=text):
+                self.assertTrue(text in body, "dispLiveRow does not handle: %s" % text)
+
+    def test_the_health_line_warns_when_jev_answered_no_turn(self):
+        body = self.function("function renderDeskHealth")
+        for text in ("summary", "fail-open", "not asked", "handed over", "note dead", "builds"):
+            with self.subTest(text=text):
+                self.assertTrue(text in body, "renderDeskHealth does not handle: %s" % text)
+
+    def test_a_local_pick_is_flagged_and_not_counted_twice(self):
+        self.assertTrue("fields.local = true" in self.function("function stageLocal"))
+        self.assertTrue('!== "local"' in self.function("function renderPending"),
+                        "the local flag counts as a second pending change")
+
     def test_all_profiles_dialog_says_what_a_dispatch_write_does(self):
         """askAll's small print speaks for model routing: a backup first, then a gateway reload. A
-        dispatch switch has neither, and neither has the conflict fix, so their callers pass their own."""
-        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=10) as resp:
-            html = resp.read().decode()
+        front desk switch has neither, so its caller passes its own."""
+        html = self.page()
         for text in ("Each profile's own switch file is overwritten; there is no backup. "
                      "It takes effect on the next message, no restart.",
-                     "Jev routing turns off for every profile on the next message, no restart.",
                      # the model-routing callers keep theirs
                      "Each profile's config is backed up first. Running agents keep their current model "
                      "until their gateway reloads."):
             with self.subTest(text=text):
                 self.assertTrue(text in html, "the page does not say: %s" % text)
+        self.assertFalse("Jev routing turns off for every profile" in html, "the conflict fix is gone")
 
     def test_a_test_result_shows_its_detail_inline_not_only_on_hover(self):
         """M1: touch screens have no hover, so the error detail cannot live only in a title."""

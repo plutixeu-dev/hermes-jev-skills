@@ -110,7 +110,7 @@
   .seg button.on[data-v=on]{background:var(--ok)}
   .seg button.on[data-v=shadow]{background:var(--accent2);color:#0b0e14}
   .jevrow{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 12px}
-  /* Receptionist dispatch (new in this fork). */
+  /* Front desk (new in this fork). */
   #dispatchCard h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);font-weight:600;
     margin:22px 0 8px}
   #dispPrivacy tr.cur td{background:rgba(94,234,212,.06)}
@@ -124,10 +124,25 @@
   #dispOrderRows>div{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 6px}
   #dispLive td{font-size:13px;white-space:nowrap}
   #dispLive td.wrap{white-space:normal;min-width:220px}
+  /* A turn the receptionist answered while something was wrong: a silent local answer must not look like success. */
+  #dispLive tr.warnrow td{background:rgba(251,191,36,.07)}
+  #deskReceptionist{margin:0 0 12px}
+  #deskReceptionist .line{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 4px}
+  #deskHealth{margin:0 0 8px}
   #dispatchCard .ok{color:var(--ok)}
   #dispatchCard .warn{color:var(--warn)}
   #dispatchCard .fail{color:var(--bad)}
   #dispatchCard button:disabled{opacity:.45;cursor:not-allowed}
+  /* Keys (new in this fork). A pasted key is never shown again, so the field is a password field. */
+  #keysTable{table-layout:auto}
+  #keysTable td{vertical-align:top}
+  #keysTable input[type=password]{width:100%;min-width:180px;background:var(--panel2);color:var(--ink);
+    border:1px solid var(--line);border-radius:8px;padding:7px 9px;font:inherit;font-size:13.5px;margin:0 0 6px}
+  #keysCard .ok,#localBox .ok{color:var(--ok)}
+  #keysCard .warn,#localBox .warn{color:var(--warn)}
+  #keysCard .fail{color:var(--bad)}
+  #keysCard a{color:var(--accent2)}
+  #keysCard button:disabled{opacity:.45;cursor:not-allowed}
   .checks{list-style:none;margin:0;padding:0}
   .checks li{margin:4px 0}
   @media (max-width:700px){
@@ -145,6 +160,10 @@
     #dispAgents,#dispAgents tbody,#dispAgents tr,#dispAgents td{display:block;width:100%}
     #dispAgents tr{border-bottom:1px solid var(--line);padding:8px 0}
     #dispAgents td{border:0;padding:3px 0}
+    #keysTable thead{display:none}
+    #keysTable,#keysTable tbody,#keysTable tr,#keysTable td{display:block;width:100%}
+    #keysTable tr{border-bottom:1px solid var(--line);padding:8px 0}
+    #keysTable td{border:0;padding:3px 0}
   }
 </style>
 </head>
@@ -172,30 +191,30 @@
       <span class="small" id="jevScope"></span>
     </div>
     <div class="small muted" id="jevCounts" style="margin:0 0 10px"></div>
+    <div class="small" id="jevDesk" style="margin:0 0 10px"></div>
     <div class="small" id="jevBody"></div>
   </div>
 
   <div class="card" id="dispatchCard">
-    <h2>Receptionist dispatch <span class="badge new" id="dispatchNew">new in this fork</span></h2>
-    <p style="margin:0 0 4px">Added in this fork: the upstream hermes-jev-skills has no dispatch.</p>
-    <p class="small muted" style="margin:0 0 14px">A turn Jev judges hard goes to Claude Code, ChatGPT (Codex) or
-      OpenRouter when the profile's privacy allows it; everything else is answered on this machine. The answer comes
-      back unchanged, with one line naming who wrote it.</p>
+    <h2>Front desk <span class="badge new" id="dispatchNew">new in this fork</span></h2>
+    <p style="margin:0 0 4px">Added in this fork: the upstream hermes-jev-skills has no front desk.</p>
+    <p class="small muted" style="margin:0 0 14px">The receptionist, this profile's chat model, keeps the chat. Each
+      ordinary turn asks Jev once. A turn Jev judges hard goes to Claude Code, ChatGPT (Codex) or OpenRouter when the
+      profile's privacy allows it. The answer comes back unchanged, with one line naming who wrote it. The chat model
+      never changes.</p>
     <div id="dispWarn"></div>
+    <div id="deskReceptionist"></div>
     <div class="jevrow">
-      <div class="seg" id="dispSeg" role="group" aria-label="Dispatch mode">
+      <div class="seg" id="dispSeg" role="group" aria-label="Front desk">
         <button data-v="off">Off</button><button data-v="shadow">Shadow</button><button data-v="on">On</button>
       </div>
       <span class="small" id="dispScope"></span>
     </div>
     <div class="small muted" id="dispCounts"></div>
-    <div class="note dead" id="dispConflict" style="display:none">
-      <span id="dispConflictText"></span>
-      <div style="margin-top:8px"><button id="dispConflictFix"></button></div>
-    </div>
+    <div id="deskWarn"></div>
     <div class="small" style="margin:12px 0 0">
       <label class="inline"><input type="checkbox" id="dispNotice"> Say so when a hard turn was answered here.</label>
-      <span class="muted">(only while dispatch is On)</span>
+      <span class="muted">(only while the front desk is On)</span>
     </div>
 
     <h3>Privacy</h3>
@@ -224,7 +243,7 @@
     </div>
 
     <div class="inline" style="margin-top:18px;flex-wrap:wrap">
-      <button class="primary" id="dispPreviewBtn" disabled>Preview dispatch changes</button>
+      <button class="primary" id="dispPreviewBtn" disabled>Preview front desk changes</button>
       <button class="ghost" id="dispDiscardBtn" style="display:none">Discard</button>
       <span class="small muted">Privacy, agents and order are saved together, to dispatch.json.</span>
     </div>
@@ -238,13 +257,28 @@
     <h3>Checks</h3>
     <div id="dispChecks"></div>
 
-    <h3>Recent dispatch decisions</h3>
+    <h3>Recent front desk decisions</h3>
+    <div class="small" id="deskHealth"></div>
     <div class="livewrap"><table id="dispLive">
-      <thead><tr><th>Time</th><th>Profile</th><th>Mode</th><th>Answered by</th><th>Privacy</th><th>Level</th>
-        <th>Reason</th><th>Attempts</th></tr></thead>
+      <thead><tr><th>Time</th><th>Profile</th><th>Mode</th><th>Jev</th><th>Tier · kind</th><th>Answered by</th>
+        <th>Privacy</th><th>Reason</th><th>Attempts</th></tr></thead>
       <tbody id="dispLiveBody"></tbody>
     </table></div>
     <p class="small muted" id="dispLiveEmpty" style="margin:10px 0 0"></p>
+  </div>
+
+  <div class="card" id="keysCard">
+    <h2>Keys <span class="badge new" id="keysNew">new in this fork</span></h2>
+    <p class="small muted" style="margin:0 0 10px">Paste a key here, never in a chat. It goes straight to this computer's
+      secret store and every profile's .env, and never comes back to this page, not even in part.</p>
+    <div class="small" id="keysRoute" style="margin:0 0 10px"></div>
+    <div id="keysWarn"></div>
+    <div class="livewrap"><table id="keysTable">
+      <thead><tr><th>Key</th><th>Status</th><th>Replace</th><th>Check</th></tr></thead>
+      <tbody id="keysBody"></tbody>
+    </table></div>
+    <p class="small muted" style="margin:10px 0 0">Check sends one small decisions request to Jev with that key, the way a
+      turn does. A running gateway picks up a replaced key after its next restart.</p>
   </div>
 
   <div class="card" id="poolCard">
@@ -292,6 +326,7 @@
       <thead><tr><th style="width:30%">Use case</th><th style="width:20%">Provider</th><th>Model</th><th style="width:90px">State</th></tr></thead>
       <tbody id="mainRow"></tbody>
     </table>
+    <div id="localBox" style="margin-top:10px"></div>
     <p class="small muted" style="margin:12px 0 0">
       Use-case-specific models override this. A slot set to <code>auto</code> follows the main model.
     </p>
@@ -347,8 +382,10 @@ let STATE = null, MODELS = [], CURRENT = null, PENDING = new Map();
 
 const PALETTE = ["#5eead4","#818cf8","#fbbf24","#f472b6","#60a5fa","#34d399","#fb923c","#a78bfa"];
 
+/* Local rows are left out: a local model is picked in the Local (Ollama) list, which writes the provider and
+   base_url with it. Typed into a cloud provider's row, a local id names a model that provider does not serve. */
 function modelOptions(current){
-  const ids = new Set(MODELS.map(m => m.id));
+  const ids = new Set(MODELS.filter(m => !m.local).map(m => m.id));
   if (current) ids.add(current);
   return [...ids].sort();
 }
@@ -374,8 +411,8 @@ function cell(useCase, kind, field, provider, model){
   const tag = document.createElement("span");
   tag.className = "badge"; tag.textContent = "unchanged";
 
-  pInput.addEventListener("input", () => stage(key, "provider", pInput.value, pInput, tag));
-  mInput.addEventListener("input", () => stage(key, "model", mInput.value, mInput, tag));
+  pInput.addEventListener("input", () => { stage(key, "provider", pInput.value, pInput, tag); if (kind === "main") stageLocal(false); });
+  mInput.addEventListener("input", () => { stage(key, "model", mInput.value, mInput, tag); if (kind === "main") stageLocal(false); });
 
   pv.appendChild(pInput); md.appendChild(mInput); st.appendChild(tag);
   tr.append(label, pv, md, st);
@@ -431,7 +468,11 @@ function changesFor(profile){
 
 function renderPending(){
   let n = 0;
-  for (const e of PENDING.values()) n += Object.keys(e.fields).length;
+  /* A local pick's `local` flag rides on its model change, so it is not a second change; on its own it is one. */
+  for (const e of PENDING.values()){
+    const fields = Object.keys(e.fields);
+    n += fields.filter(f => f !== "local").length || (fields.length ? 1 : 0);
+  }
   $("#pendingLabel").textContent = n ? n + " pending change" + (n>1?"s":"") : "no pending changes";
   $("#applyBtn").disabled = n === 0;
 }
@@ -531,6 +572,7 @@ function renderAll(){
   });
   renderPending();
   markMixed();
+  renderLocalModels();
 
   // reflect any pending edits for this profile back into the inputs
   PENDING.forEach(e => {
@@ -653,7 +695,7 @@ async function load(){
   fillModels(m);
   $("#homeLabel").textContent = STATE.hermes_home;
   $("#countLabel").textContent = STATE.profiles.length + " profiles";
-  renderJev(); renderAll(); loadSwitches(); loadPools(); loadDispatch(); loadDispatchLive();
+  renderJev(); renderAll(); loadSwitches(); loadPools(); loadDispatch(); loadDispatchLive(); loadKeys();
   const errs = STATE.profiles.filter(p => p.error);
   if (errs.length) console.warn("profiles with read errors", errs);
 }
@@ -666,9 +708,62 @@ function fillModels(m){
 
   const pl = document.getElementById("providerList") || (() => {
     const d = document.createElement("datalist"); d.id = "providerList"; document.body.appendChild(d); return d; })();
-  pl.innerHTML = ""; [...new Set(MODELS.map(x => x.provider).filter(Boolean))].forEach(p => {
+  pl.innerHTML = ""; [...new Set(MODELS.filter(x => !x.local).map(x => x.provider).filter(Boolean))].forEach(p => {
     const o = document.createElement("option"); o.value = p; pl.appendChild(o); });
   fillDispatchModels();
+  LOCAL = (m && m.local) || LOCAL;
+  renderLocalModels();
+}
+
+/* --- Local (Ollama) models (new in this fork) ---
+   What this machine's Ollama serves, as /api/models reports it (loopback or a private address only). A pick
+   carries `local: true`, so the server writes the provider and base_url that go with the model
+   (routing_store._main_targets). Typing in the main row by hand drops the flag again. */
+let LOCAL = null;
+
+function stageLocal(on){
+  const pk = CURRENT + "|__main__", entry = PENDING.get(pk) || {profile: CURRENT, key: "__main__", fields: {}};
+  if (on) entry.fields.local = true; else delete entry.fields.local;
+  if (Object.keys(entry.fields).length) PENDING.set(pk, entry); else PENDING.delete(pk);
+  renderPending();
+}
+
+function renderLocalModels(){
+  const box = $("#localBox");
+  if (!box || !STATE) return;
+  const models = LOCAL && Array.isArray(LOCAL.models) ? LOCAL.models : [];
+  const pending = PENDING.get(CURRENT + "|__main__"), local = !!(pending && pending.fields.local);
+  const picked = local ? pending.fields.model || currentValue("__main__", "model") : "";
+  const sel = document.createElement("select");
+  sel.id = "localModels"; sel.setAttribute("aria-label", "Local (Ollama) model for the receptionist");
+  sel.add(new Option(models.length ? "Local (Ollama): pick a model…" : "Local (Ollama): none found", ""));
+  models.forEach(m => sel.add(new Option(m.name + (m.parameter_size ? " · " + m.parameter_size : ""), m.name)));
+  sel.disabled = !models.length;
+  sel.value = models.some(m => m.name === picked) ? picked : "";
+  sel.classList.toggle("changed", local);
+  sel.onchange = () => pickLocal(sel.value);
+  const note = document.createElement("div");
+  note.className = "small muted"; note.style.marginTop = "6px";
+  note.innerHTML = models.length
+    ? "Picking one sets the provider and base_url for this machine's Ollama. The preview shows every line."
+    : esc(LOCAL ? LOCAL.reason || "Ollama lists no models" : "Asking this machine's Ollama…") +
+      (LOCAL && LOCAL.url ? " · <code>" + esc(LOCAL.url) + "</code>" : "");
+  box.innerHTML = ""; box.append(sel, note);
+}
+
+function pickLocal(name){
+  const input = document.querySelector('#mainRow input[data-field="model"]');
+  if (!input) return;
+  const tag = input.closest("tr").querySelector(".badge");
+  if (!name){                                           // back to "pick a model…": undo the pick
+    input.value = currentValue("__main__", "model");
+    stage("__main__", "model", input.value, input, tag); stageLocal(false);
+  } else {
+    input.value = name;
+    stage("__main__", "model", name, input, tag); stageLocal(true);
+    input.classList.add("changed"); tag.className = "badge changed"; tag.textContent = "changed";
+  }
+  renderLocalModels();
 }
 
 $("#refreshBtn").onclick = load;
@@ -707,7 +802,7 @@ $("#applyBtn").onclick = async () => {
   if (r.error){ alert(r.error); return; }
   $("#previewCard").style.display = "";
   $("#previewBody").textContent = (r.rows.length ? r.rows.map(x =>
-      (x.scope === "__main__" ? "main" : x.scope) + "." + x.field + ":  " + (x.before||"(unset)") + "  →  " + x.after
+      (x.scope === "__main__" ? "main" : x.scope) + "." + x.field + ":  " + (x.before||"(unset)") + "  →  " + (x.after||"(unset)")
     ).join("\n") : "nothing to change") + "\n\nprofile: " + CURRENT;
   $("#previewCard").scrollIntoView({behavior:"smooth", block:"center"});
 };
@@ -797,6 +892,9 @@ function renderSwitch(){
     : "Jev routing for <b>" + esc(CURRENT) + "</b> <span class='muted'>(" + (own ? "its own setting" : "following the all-profiles default") + ")</span>";
   $("#jevCounts").textContent = "Right now: " + count("on") + " on · " + count("shadow") + " shadow · " + count("off") +
     " off.  On = Jev switches models. Shadow = Jev decides and logs but does not switch. Takes effect on the next message, no restart.";
+  const desk = DISPATCH ? Object.entries(DISPATCH.profiles).filter(([, p]) => dispMode(p) !== "off").map(([n]) => n) : [];
+  $("#jevDesk").textContent = desk.length ? "The front desk decides in " + desk.join(", ") +
+    ": routing asks Jev nothing and swaps nothing there." : "";
 }
 
 document.querySelectorAll("#jevSeg button").forEach(b => b.onclick = async () => {
@@ -810,12 +908,12 @@ document.querySelectorAll("#jevSeg button").forEach(b => b.onclick = async () =>
     body: JSON.stringify({scope: all ? ALL : CURRENT, switch: "routing", value, confirm: all})}).then(x => x.json());
   if (r.error){ alert(r.error); return; }
   SWITCHES = r; renderSwitch();
-  loadDispatch();                   // the dispatch card's conflict note reads this same switch
+  loadDispatch();                   // the front desk card says where routing stands aside
   if (LIVE_TIMER) pollLive();
 });
 
-/* --- Receptionist dispatch ---
-   New in this fork: the upstream hermes-jev-skills has no dispatch. Mode and notice switch at once, like the
+/* --- Front desk ---
+   New in this fork: the upstream hermes-jev-skills has no front desk. Mode and notice switch at once, like the
    Jev switch, in each profile's jev/dispatch-state.json (the file /dispatch writes). Privacy, agents and order
    are staged, previewed, then saved together to <hermes root>/jev/dispatch.json with a backup and a verified
    read-back. The plugin reads both files on every turn, so nothing here restarts anything. */
@@ -831,7 +929,6 @@ const DISP_FRONTIER = ["claude", "openai"];            // all that frontier_orde
 const DISP_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/@+\[\]-]{0,127}$/;   // jevkit.agents._MODEL_NAME; the server decides
 /* askAll's own small print is model routing's (a backup, then a reload). These writes have neither. */
 const DISP_ALL_NOTE = "Each profile's own switch file is overwritten; there is no backup. It takes effect on the next message, no restart.";
-const DISP_JEV_OFF_NOTE = "Jev routing turns off for every profile on the next message, no restart. Its switch files are rewritten; there is no backup.";
 let DISPATCH = null, DISP_PENDING = {profiles: {}, agents: {}, order: {}}, DISP_PLANNED = null;
 let DISP_TESTS = {}, DISP_SEEN = 0;
 
@@ -849,12 +946,55 @@ async function loadDispatch(){
     return;
   }
   $("#dispWarn").innerHTML = "";
-  DISPATCH = r; renderDispatch();
+  DISPATCH = r; renderDispatch(); renderSwitch();
 }
 
 function renderDispatch(){
   if (!DISPATCH || !STATE) return;
-  renderDispMode(); renderDispPrivacy(); renderDispAgents(); renderDispOrder(); renderDispSave(); renderDispChecks();
+  renderDeskReceptionist(); renderDispMode(); renderDeskWarnings();
+  renderDispPrivacy(); renderDispAgents(); renderDispOrder(); renderDispSave(); renderDispChecks();
+}
+
+/* The receptionist is each profile's chat model in config.yaml. It is not a pin: only a /model in one chat is. */
+function renderDeskReceptionist(){
+  const all = CURRENT === ALL, scope = dispScope();
+  const said = n => {
+    const d = DISPATCH.profiles[n].receptionist || {};
+    return d.model ? "<b>" + esc(d.model) + "</b> · " + (d.local ? "local" : esc(d.provider || "no provider"))
+      : "<span class='warn'>not set</span>";
+  };
+  $("#deskReceptionist").innerHTML = !scope.length ? "" :
+    "<div class='line small'><span>" + (all ? "Receptionists:" : "Receptionist: " + said(scope[0])) + "</span>" +
+    "<button class='ghost' id='deskChange'>Change</button></div>" +
+    (all ? scope.map(n => "<div class='small'><b>" + esc(n) + "</b>: " + said(n) + "</div>").join("") : "") +
+    "<div class='small muted'>The chat model saved in config.yaml. It is not a pin: only a /model in one chat is. " +
+    "A running gateway picks up a new one after its next restart.</div>";
+  const change = $("#deskChange");
+  if (change) change.onclick = () => {
+    const target = $("#localModels:not([disabled])") || document.querySelector('#mainRow input[data-field="model"]');
+    $("#localBox").scrollIntoView({behavior:"smooth", block:"center"});
+    if (target) target.focus({preventScroll: true});
+  };
+}
+
+/* Why a Shadow or On front desk would still leave every turn on the receptionist (dispatch_store._desk_warnings). */
+const DESK_WARN = {
+  no_receptionist: "No receptionist saved in config.yaml: set the chat model under Main model.",
+  privacy_only_here: "Privacy is “Only this machine”, so Jev is never asked and every turn stays on the receptionist. Choose “May go to an agent” under Privacy.",
+  features_only: "A private profile: Jev reads coarse features (length, code, risk words), not the text, so it judges fewer turns hard.",
+  no_agent: "No agent is on: Jev is asked, but every turn stays on the receptionist. Switch one on under Agents.",
+  no_jev_key: "No Jev key: every turn fails open to the receptionist. Add one under Keys, then press Check.",
+  no_handover: "This receptionist runs on the ChatGPT login (codex_responses). The front desk decides and logs, but cannot hand a turn over from it yet, so the receptionist answers every turn.",
+};
+
+function renderDeskWarnings(){
+  const all = CURRENT === ALL, lines = [];
+  dispScope().forEach(n => (DISPATCH.profiles[n].warnings || []).forEach(w =>
+    lines.push("<div class='note dead'>" + (all ? "<b>" + esc(n) + "</b>: " : "") + esc(DESK_WARN[w] || w) + "</div>")));
+  const aside = dispScope().filter(n => DISPATCH.profiles[n].routing_stands_aside);
+  if (aside.length) lines.push("<div class='note'>Jev routing is on for " + esc(aside.join(", ")) +
+    ": it stands aside there, and the front desk asks Jev instead. Nothing to change.</div>");
+  $("#deskWarn").innerHTML = lines.join("");
 }
 
 /* The profiles the picker points at: every one for "All profiles", else just the current one. */
@@ -874,21 +1014,13 @@ function renderDispMode(){
   const sources = [...new Set(profs.map(p => p.mode.source))];
   const source = sources.length === 1 ? DISP_SOURCE[sources[0]] || sources[0] : "set in different places";
   $("#dispScope").innerHTML = !scope.length ? "<span class='muted'>Pick a profile above.</span>"
-    : (all ? "Dispatch for <b>all " + scope.length + " profiles</b>" : "Dispatch for <b>" + esc(CURRENT) + "</b>") +
+    : (all ? "Front desk for <b>all " + scope.length + " profiles</b>" : "Front desk for <b>" + esc(CURRENT) + "</b>") +
       " <span class='muted'>(" + (mode ? esc(source) : "currently mixed") + ")</span>";
   const every = Object.values(DISPATCH.profiles).map(dispMode);
   const count = v => every.filter(x => x === v).length;
   $("#dispCounts").textContent = "Right now: " + count("on") + " on · " + count("shadow") + " shadow · " + count("off") +
-    " off.  On = a hard turn goes to an agent. Shadow = dispatch decides and logs, this machine still answers." +
-    " Takes effect on the next message, no restart.";
-
-  const clash = scope.filter(n => DISPATCH.profiles[n].conflict), by = {};
-  clash.forEach(n => { const v = DISPATCH.profiles[n].jev_routing; (by[v] = by[v] || []).push(n); });
-  $("#dispConflict").style.display = clash.length ? "" : "none";
-  $("#dispConflictText").textContent = "Jev routing is " +
-    Object.entries(by).map(([v, names]) => v + " for " + names.join(", ")).join(" and ") +
-    ". Only one of them decides a turn, so dispatch stands aside there.";
-  $("#dispConflictFix").textContent = "Turn Jev routing off for " + (all ? "all profiles" : CURRENT);
+    " off.  On = a hard turn goes to an agent. Shadow = the front desk asks Jev and logs who would answer; the" +
+    " receptionist still answers. Takes effect on the next message, no restart.";
 
   const notices = [...new Set(profs.map(p => p.notice.value === "on"))], box = $("#dispNotice");
   box.indeterminate = notices.length > 1;
@@ -898,27 +1030,16 @@ function renderDispMode(){
 async function dispSwitch(name, value){
   if (!DISPATCH) return;
   const all = CURRENT === ALL;
-  if (all && !(await askAll({"Receptionist dispatch": {[name]: value}}, Object.keys(DISPATCH.profiles).length,
+  if (all && !(await askAll({"Front desk": {[name]: value}}, Object.keys(DISPATCH.profiles).length,
                             DISP_ALL_NOTE))){
     renderDispMode(); return;                                  // puts the notice box back
   }
   const r = await dispPost("/api/dispatch/switch", {scope: all ? ALL : CURRENT, switch: name, value, confirm: all});
   if (r.error){ alert(r.error); renderDispMode(); return; }
-  DISPATCH = r; renderDispatch();
+  DISPATCH = r; renderDispatch(); renderSwitch();
 }
 document.querySelectorAll("#dispSeg button").forEach(b => b.onclick = () => dispSwitch("mode", b.dataset.v));
 $("#dispNotice").onchange = () => dispSwitch("notice", $("#dispNotice").checked ? "on" : "off");
-
-/* One classifier per turn: while Jev routing is on or in shadow, dispatch stands aside. */
-$("#dispConflictFix").onclick = async () => {
-  const all = CURRENT === ALL;
-  if (all && !(await askAll({"Jev routing": {mode: "off"}}, Object.keys(DISPATCH.profiles).length,
-                            DISP_JEV_OFF_NOTE))) return;
-  const r = await dispPost("/api/jev/switch", {scope: all ? ALL : CURRENT, switch: "routing", value: "off", confirm: all});
-  if (r.error){ alert(r.error); return; }
-  SWITCHES = r; renderSwitch(); if (LIVE_TIMER) pollLive();
-  await loadDispatch();
-};
 
 /* Stage one edit, or drop it when it puts back what is saved. Any edit makes a preview on screen stale. */
 function dispStage(section, key, field, value){
@@ -1105,7 +1226,7 @@ function renderDispSave(){
   const p = DISP_PENDING;
   const n = Object.keys(p.profiles).length + Object.keys(p.order).length +
     Object.values(p.agents).reduce((sum, fields) => sum + Object.keys(fields).length, 0);
-  $("#dispPreviewBtn").textContent = "Preview dispatch changes" + (n ? " (" + n + ")" : "");
+  $("#dispPreviewBtn").textContent = "Preview front desk changes" + (n ? " (" + n + ")" : "");
   $("#dispPreviewBtn").disabled = !n;
   $("#dispDiscardBtn").style.display = n ? "" : "none";
 }
@@ -1192,35 +1313,155 @@ function renderDispChecks(){
     "<p class='small muted' style='margin:10px 0 0'>After installing, restart the gateway one time so Hermes loads the plugin.</p>";
 }
 
-/* Decisions only: the log never holds a turn's text or an answer. In shadow nobody else answers,
-   so an agent there is who would have. */
+const JEV_ROUTE = {"openrouter": "OpenRouter", "typesafe": "TypeSafe"};
+/* One row per turn, decisions only: the log never holds a turn's text or an answer. A turn the receptionist
+   answered after Jev failed, in a profile that keeps every turn here, or that Jev judged hard with nowhere to
+   go, is a warning: a silent local answer must not look like success. In shadow an agent is who would have. */
 function dispLiveRow(e, fresh){
-  const tr = document.createElement("tr");
-  if (fresh) tr.className = "fresh";
-  const agent = e.agent || "local";
-  const who = agent === "local" ? "this machine" : (e.live === true ? "" : "<span class='muted'>would be</span> ") +
-    "<b>" + esc(DISP_LABEL[agent] || agent) + "</b>" + (e.model ? " · " + esc(e.model) : "");
+  const tr = document.createElement("tr"), j = e.jev || {};
+  const warn = e.outcome === "receptionist_warning" || e.outcome === "not_handed_over";
+  tr.className = (fresh ? "fresh" : "") + (warn ? " warnrow" : "");
+  const jev = j.call === "called" ? "<span class='ok'>called</span>" + (j.latency_ms != null ? " · " + esc(j.latency_ms) + " ms" : "") +
+      (j.via ? " · " + esc(JEV_ROUTE[j.via] || j.via) : "") + (j.read === "features" ? " <span class='muted'>(features)</span>" : "")
+    : j.call === "fail_open" ? "<span class='warn'>fail-open</span>" + (j.error ? " · " + esc(j.error) : "")
+    : j.call === "not_called" ? "<span class='muted'>not called</span>"
+    : j.call === "given" ? "<span class='muted'>answers given</span>" : "<span class='muted'>—</span>";
+  const tier = j.tier ? '<span class="tier ' + esc(j.tier) + '">' + esc(j.tier) + "</span> " + esc(j.specialty || "")
+    : "<span class='muted'>—</span>";
+  const agent = esc(DISP_LABEL[e.agent] || e.agent || ""), model = e.model ? " · " + esc(e.model) : "";
+  const desk = e.chat_model ? " · " + esc(e.chat_model) : "";
+  const who = e.outcome === "agent" ? "<b>" + agent + "</b>" + model
+    : e.outcome === "would_be_agent" ? "<span class='muted'>would be</span> <b>" + agent + "</b>" + model
+    : e.outcome === "not_handed_over" ? "<span class='warn'>receptionist</span>" + desk + " <span class='muted'>(" + agent +
+      " chosen; this chat model's API, " + esc(e.api_mode || "unknown") + ", cannot hand a turn over yet)</span>"
+    : (e.outcome === "receptionist_warning" ? "<span class='warn'>receptionist</span>" : "receptionist") + desk;
   const cells = [e.ts ? esc(new Date(Number(e.ts) * 1000).toLocaleTimeString()) : "", esc(e.profile),
-    esc(e.mode) + (e.mode === "on" && e.live === false ? " <span class='muted'>(not live)</span>" : ""), who,
+    esc(e.mode) + (e.mode === "on" && e.live === false ? " <span class='muted'>(not live)</span>" : ""), jev, tier, who,
     esc(e.privacy) + (e.privacy_why ? " <span class='muted'>· " + esc(e.privacy_why) + "</span>" : ""),
-    esc(e.niveau), (e.downgraded ? "<span class='warn'>downgraded</span> · " : "") + esc(e.reason),
+    (e.downgraded ? "<span class='warn'>downgraded</span> · " : "") + esc(e.reason),
     (Array.isArray(e.attempts) ? e.attempts : []).map(a => esc((a || {}).agent) + ": " + esc((a || {}).error))
       .join(", ") || "<span class='muted'>—</span>"];
-  tr.innerHTML = cells.map((c, i) => "<td" + (i === 6 ? ' class="wrap"' : "") + ">" + c + "</td>").join("");
+  tr.innerHTML = cells.map((c, i) => "<td" + (i === 5 || i === 7 ? ' class="wrap"' : "") + ">" + c + "</td>").join("");
   return tr;
+}
+
+/* The rows on screen in one line (dispatch_store._window). When no turn in the window reached Jev, the chain
+   breaks before Jev and the receptionist answered every turn: that must not read as fine. */
+function renderDeskHealth(summary){
+  const s = summary || {}, turns = Number(s.turns) || 0, jev = s.jev || {}, out = s.outcomes || {};
+  if (!turns){ $("#deskHealth").innerHTML = ""; return; }
+  const asked = (jev.called || 0) + (jev.given || 0);
+  const here = (out.receptionist || 0) + (out.receptionist_warning || 0) + (out.not_handed_over || 0);
+  const warns = (out.receptionist_warning || 0) + (out.not_handed_over || 0);
+  const parts = ["Last " + turns + " turn" + (turns === 1 ? "" : "s") + ": Jev called " + (jev.called || 0) +
+      (s.latency_ms != null ? " (mean " + esc(s.latency_ms) + " ms)" : ""),
+    "fail-open " + (jev.fail_open || 0), "not asked " + ((jev.not_called || 0) + (jev.unknown || 0)),
+    "handed over " + (out.agent || 0)];
+  if (out.would_be_agent) parts.push("would be handed over " + out.would_be_agent);
+  parts.push("answered here " + here + (warns ? " (" + warns + " warning" + (warns === 1 ? "" : "s") + ")" : ""));
+  /* The alias moves; the thresholds are tuned to one build. Two builds in one window is worth seeing. */
+  const builds = Object.entries(s.builds || {});
+  const build = !builds.length ? "" : "<div class='muted'>" + (builds.length === 1 ? "Jev build: " + esc(builds[0][0])
+    : "Jev builds in this window: " + builds.map(([b, n]) => esc(b) + " (" + esc(n) + ")").join(", ") +
+      ". jev-latest moved: compare the rows before and after.") + "</div>";
+  $("#deskHealth").innerHTML = asked ? parts.join(" · ") + build
+    : "<div class='note dead' style='margin:0'>" + parts.join(" · ") + build + "<div style='margin-top:6px'>Jev answered " +
+      "none of these turns, so the receptionist answered every one. Keys → Check, and the rows below, say why.</div></div>";
 }
 
 async function loadDispatchLive(){
   const r = await fetch("/api/dispatch/live?since=0", {headers: HDR}).then(x => x.json()).catch(e => ({error: String(e)}));
   const empty = $("#dispLiveEmpty");
-  if (!r || r.error){ empty.textContent = "Could not read the dispatch decisions: " + (r ? r.error : "no answer"); return; }
+  if (!r || r.error){ empty.textContent = "Could not read the front desk decisions: " + (r ? r.error : "no answer"); return; }
   const events = (Array.isArray(r.events) ? r.events : []).map(e => e || {});
   const body = $("#dispLiveBody"); body.innerHTML = "";
   events.forEach(e => body.appendChild(dispLiveRow(e, DISP_SEEN && Number(e.ts) > DISP_SEEN)));
   if (events.length) DISP_SEEN = Math.max(DISP_SEEN, Number(events[0].ts) || 0);
   else DISP_SEEN = DISP_SEEN || r.now;
+  renderDeskHealth(r.summary);
   empty.textContent = events.length ? "Decisions only: the text of a turn and its answer are never logged or shown here."
-    : "No dispatch decisions yet. Set Shadow for a profile and send it a message.";
+    : "No front desk decisions yet. Set Shadow for a profile and send it a message.";
+}
+
+/* --- Keys (new in this fork) ---
+   A key goes from its field to the server once and is never shown again, not even in part. The field is
+   cleared before the request goes, whatever happens next, and nothing here logs a value. */
+let KEYS = null, KEY_OUT = {};
+const KEY_SOURCE = {"os-secret-store": "in this computer's secret store", "credentials-file": "in ~/.config/jev (0600)",
+                    "environment": "in the dashboard's environment", "absent": "not in this computer's store"};
+/* What a failed Check means (codes from jevkit.client). The code itself stays beside the words. */
+const KEY_ERROR = {
+  auth_failed: "the key was refused",
+  forbidden: "the key may not use this model",
+  credits_exhausted: "no credit left",
+  rate_limited: "rate limited, try again in a minute",
+  network: "Jev could not be reached from this machine",
+  timeout: "Jev could not be reached from this machine",
+  http_404: "this model id is not served (jev-latest moved?)",
+  http_410: "this model id is not served (jev-latest moved?)",
+  no_key: "no key stored",
+};
+
+async function loadKeys(){
+  const r = await fetch("/api/keys/state", {headers: HDR}).then(x => x.json()).catch(e => ({error: String(e)}));
+  if (!r || r.error){ $("#keysWarn").innerHTML = "<div class='note dead'>Keys could not be read: " + esc(r ? r.error : "no answer") + "</div>"; return; }
+  KEYS = r; renderKeys();
+}
+
+function renderKeys(){
+  if (!KEYS) return;
+  $("#keysRoute").innerHTML = KEYS.jev_route === "absent"
+    ? "<span class='warn'>No Jev key: every turn fails open to the receptionist.</span>"
+    : "Turns reach Jev through <b>" + esc(KEYS.providers[KEYS.jev_route].label) + "</b> · <code>" + esc(KEYS.jev_model) + "</code>";
+  $("#keysWarn").innerHTML = KEYS.accepts_keys ? "" : "<div class='note dead'>This dashboard is not bound to loopback, so it " +
+    "takes no keys. Open it through the ssh tunnel <code>jev dashboard</code> prints, or run <code>jev setup-key</code>.</div>";
+  const body = $("#keysBody"); body.innerHTML = "";
+  Object.entries(KEYS.providers).forEach(([name, p]) => {
+    const lanes = Object.entries(p.lanes).filter(([, has]) => has).map(([n]) => n);
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td><b>' + esc(p.label) + '</b><div class="small"><a href="' + esc(p.get) +
+      '" target="_blank" rel="noreferrer noopener">get a key</a></div></td><td class="small">' +
+      (p.present ? "<span class='ok'>present</span> · " : "") + esc(KEY_SOURCE[p.source] || p.source) +
+      "<div class='muted'>" + (lanes.length ? ".env of " + esc(lanes.join(", ")) : "in no profile's .env") + "</div></td><td></td><td></td>";
+    const input = document.createElement("input");
+    input.type = "password"; input.id = "keyInput-" + name; input.autocomplete = "off"; input.spellcheck = false;
+    input.disabled = !KEYS.accepts_keys; input.placeholder = "paste a new key"; input.setAttribute("aria-label", p.label + " key");
+    const save = document.createElement("button"); save.textContent = "Save"; save.disabled = !KEYS.accepts_keys;
+    save.setAttribute("aria-label", "Save the " + p.label + " key");
+    save.onclick = () => keySave(name, input);
+    const check = document.createElement("button"); check.className = "ghost"; check.textContent = "Check";
+    check.setAttribute("aria-label", "Check the " + p.label + " key");
+    check.onclick = () => keyCheck(name);
+    const out = document.createElement("div"); out.className = "small"; out.setAttribute("aria-live", "polite");
+    out.innerHTML = KEY_OUT[name] || "";
+    tr.children[2].append(input, save); tr.children[3].append(check, out);
+    body.appendChild(tr);
+  });
+}
+
+async function keySave(name, input){
+  const key = input.value;
+  input.value = "";                                   // cleared before the request goes, whatever happens next
+  if (!key.trim()) return;
+  KEY_OUT[name] = "saving…"; renderKeys();
+  const r = await dispPost("/api/keys/save", {provider: name, key: key, confirm: true});
+  KEY_OUT[name] = r.error ? "<span class='fail'>" + esc(r.error) + "</span>"
+    : r.ok ? "<span class='ok'>stored" + (r.verified ? " and accepted by " + esc(KEYS.providers[name].label) : "") +
+      "</span> · a running gateway picks it up after its next restart"
+    : "<span class='fail'>" + esc(r.reason || "not stored") + "</span>";
+  await loadKeys();
+}
+
+async function keyCheck(name){
+  if (!confirm("Send one small decisions request to Jev with the " + KEYS.providers[name].label +
+               " key? It costs a fraction of a cent.")) return;
+  KEY_OUT[name] = "checking…"; renderKeys();
+  const r = await dispPost("/api/keys/check", {provider: name, confirm: true});
+  KEY_OUT[name] = r.ok ? "<span class='ok'>ok</span> · <code>" + esc(r.model) + "</code> · " + esc(r.latency_ms) + " ms" +
+      (r.build ? "<div class='muted'>answered by " + esc(r.build) + "</div>" : "")
+    : "<span class='fail'>" + esc(KEY_ERROR[r.error] || r.error || "failed") + "</span>" +
+      (KEY_ERROR[r.error] ? " <span class='muted'>(" + esc(r.error) + ")</span>" : "");
+  renderKeys();
 }
 
 /* --- Jev live --- */

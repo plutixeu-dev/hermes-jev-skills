@@ -510,15 +510,17 @@ class DispatchStoreTests(unittest.TestCase):
 
     def test_live_sums_up_the_window_so_a_broken_chain_shows_at_a_glance(self):
         self.log("default",
-                 {"ts": 1, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "called", "latency_ms": 400}},
-                 {"ts": 2, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "called", "latency_ms": 600}},
+                 {"ts": 1, "kind": "dispatch", "mode": "on", "agent": "local",
+                  "jev": {"call": "called", "latency_ms": 400, "build": "jev-1.13-a"}},
+                 {"ts": 2, "kind": "dispatch", "mode": "on", "agent": "local",
+                  "jev": {"call": "called", "latency_ms": 600, "build": "jev-1.13-b"}},
                  {"ts": 3, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "fail_open", "error": "timeout"}},
                  {"ts": 4, "kind": "dispatch", "mode": "on", "live": True, "handed_over": True, "agent": "claude",
-                  "jev": {"call": "called", "latency_ms": 500}})
+                  "jev": {"call": "called", "latency_ms": 500, "build": "jev-1.13-a"}})
         summary = ds.live(self.home)["summary"]
         self.assertEqual(summary, {"turns": 4, "jev": {"called": 3, "fail_open": 1},
                                    "outcomes": {"receptionist": 2, "receptionist_warning": 1, "agent": 1},
-                                   "latency_ms": 500})
+                                   "latency_ms": 500, "builds": {"jev-1.13-a": 2, "jev-1.13-b": 1}})
 
     def test_live_honours_since_and_sorts_newest_first(self):
         self.log("default", {"ts": 1, "kind": "dispatch", "agent": "local"},

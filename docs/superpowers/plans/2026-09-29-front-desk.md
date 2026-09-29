@@ -2336,7 +2336,21 @@ async function keyCheck(name){
 
 - [ ] **Step 9: Run** the three global commands.
 
-- [ ] **Step 10: Commit.** Stage `router-dashboard/static/index.html router-dashboard/tests/test_server.py scripts/demo_home.py`. Message: `dashboard: one Front desk card, a keys card, local models, and a live row that says who answered`.
+- [ ] **Step 10: Commit.** Stage `router-dashboard/static/index.html router-dashboard/tests/test_server.py scripts/demo_home.py router-dashboard/dispatch_store.py router-dashboard/tests/test_dispatch_store.py`. Message: `dashboard: one Front desk card, a keys card, local models, and a live row that says who answered`.
+
+**As built (2026-09-29).** Where the page differs from the steps above, and why:
+- **Builds in the window.** `dispatch_store._window` also counts `builds`. The health line names the build that answered, or, with two builds in one window, says that `jev-latest` moved.
+- **Local rows stay out of the typed lists.** The model and provider datalists leave out local rows. A local model is picked in the Local (Ollama) list, which writes the provider and `base_url` with it; typed into a cloud provider's row, a local id names a model that provider does not serve.
+- **A re-pick counts.** `local` alone counts as one pending change. Picking the model a profile already names still fixes its provider and `base_url`.
+- **Previews say "(unset)"** for a value a write clears, such as a local `base_url` when leaving local.
+- **One name on the card.** The button reads "Preview front desk changes" and the table "Recent front desk decisions". The guides follow in Task 11.
+- **The demo's other five profiles** write a real `model:` block (provider and default), the shape Hermes reads, so the Main model card and the receptionist line show something.
+- **More page tests:** every desk warning has words, every Check error code has words, the health line's warning, and the local flag counted once.
+- **The browser check** covered Chromium at 1280 and 390 px with no console errors and no horizontal page scroll. A stand-in Ollama on loopback exercised the local flow end to end:
+  - a pick wrote `custom`, the model and `base_url` with a verified read-back;
+  - another model on the same server kept the provider;
+  - leaving local cleared `base_url`;
+  - Change focused the local list.
 
 ---
 

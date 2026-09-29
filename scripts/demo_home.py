@@ -73,6 +73,37 @@ DECISIONS = [
 
 STATE = {"routing": "shadow", "skills": "on", "notice": "off"}
 
+# A profile whose front desk is on: a local receptionist, Claude Code as its one agent, and three turns
+# that show what a row says. Rows are what hermes-dispatch logs: decisions only, never a turn's text.
+DESK = "desk"
+DESK_CONFIG = ("model:\n  provider: custom\n  default: qwen3.5:4b\n  base_url: http://127.0.0.1:11434/v1\n"
+               "plugins:\n  enabled: [hermes-jev, hermes-dispatch]\n")
+DESK_POLICY = {"profiles": {DESK: "private"},
+               "agents": {"claude": {"enabled": True, "model": "opus", "only_repo": False}}}
+LOCAL_TURN = {"chat_model": "qwen3.5:4b", "api_mode": "chat_completions"}
+DESK_ROWS = [
+    # Jev called through OpenRouter, judged hard coding work, and Claude Code answered.
+    {**LOCAL_TURN, "mode": "on", "live": True, "handed_over": True, "agent": "claude", "model": "opus",
+     "reason": "frontier work for claude", "downgraded": False, "privacy": "private", "privacy_why": f"profile {DESK}",
+     "would_send_chars": 1840,
+     "triage": {"type": "CHANGE", "exit": "ESCALATE", "signals": ["G8"], "niveau": "frontier", "repo_werk": True,
+                "source": "jev", "why": "hard coding"},
+     "jev": {"call": "called", "latency_ms": 412, "via": "openrouter", "model": "~typesafe/jev-latest",
+             "build": "typesafe/jev-1.13-20260917", "read": "features", "tier": "hard", "specialty": "coding",
+             "confidence": 0.91, "difficulty": 2.41, "stakes": 0.32},
+     "attempts": []},
+    # Jev was rate limited, so the receptionist answered: a warning row, never a silent success.
+    {**LOCAL_TURN, "mode": "on", "live": True, "handed_over": False, "agent": "local", "model": "",
+     "reason": "standard work stays on this machine", "downgraded": False, "privacy": "private",
+     "privacy_why": f"profile {DESK}",
+     "triage": {"type": "EXPLAIN", "exit": "PROCEED", "signals": [], "niveau": "standard", "repo_werk": False,
+                "source": "fail_open", "why": "Jev unavailable (rate_limited)"},
+     "jev": {"call": "fail_open", "error": "rate_limited", "read": "features"}, "attempts": []},
+    # /model in one chat: that chat runs the model the person chose, and Jev is not asked there.
+    {"mode": "on", "chat_model": "gpt-5.5", "api_mode": "codex_responses", "agent": "local",
+     "jev": {"call": "not_called"}, "reason": "pinned: this chat runs a model chosen with /model, not the receptionist"},
+]
+
 
 def home_for(root: Path, profile: str) -> Path:
     return root if profile == "default" else root / "profiles" / profile
@@ -85,9 +116,20 @@ def build(root: Path, now: float) -> Path:
         home = home_for(root, profile)
         (home / "jev").mkdir(parents=True, exist_ok=True)
         (home / "logs").mkdir(parents=True, exist_ok=True)
-        (home / "config.yaml").write_text(f"agent:\n  provider: openrouter\n  model: {model}\n", encoding="utf-8")
+        (home / "config.yaml").write_text(f"model:\n  provider: openrouter\n  default: {model}\n", encoding="utf-8")
         (home / "jev" / "state.json").write_text(json.dumps(STATE), encoding="utf-8")
     (root / "jev" / "routing.json").write_text(json.dumps(ROUTING, indent=2), encoding="utf-8")
+
+    desk = home_for(root, DESK)
+    (desk / "jev").mkdir(parents=True, exist_ok=True)
+    (desk / "logs").mkdir(parents=True, exist_ok=True)
+    (desk / "config.yaml").write_text(DESK_CONFIG, encoding="utf-8")
+    (desk / "jev" / "state.json").write_text(json.dumps(STATE), encoding="utf-8")     # routing stands aside here
+    (desk / "jev" / "dispatch-state.json").write_text(json.dumps({"mode": "on"}), encoding="utf-8")
+    (root / "jev" / "dispatch.json").write_text(json.dumps(DESK_POLICY, indent=2), encoding="utf-8")
+    rows = [json.dumps({"ts": round(now - (len(DESK_ROWS) - index) * 41.3, 3), "profile": DESK, "kind": "dispatch",
+                        **row}, separators=(",", ":")) for index, row in enumerate(DESK_ROWS)]
+    (desk / "logs" / "jev-decisions.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
 
     lines = {}
     for index, (profile, tier, specialty, model, current, confidence, images, ms) in enumerate(DECISIONS):
@@ -107,7 +149,8 @@ def build(root: Path, now: float) -> Path:
 def main(argv: list) -> int:
     root = Path(argv[0] if argv else "/tmp/jev-demo-home").expanduser()
     build(root, time.time())
-    print(json.dumps({"home": str(root), "profiles": sorted(PROFILES), "decisions": len(DECISIONS),
+    print(json.dumps({"home": str(root), "profiles": sorted([*PROFILES, DESK]), "decisions": len(DECISIONS),
+                      "front_desk_rows": len(DESK_ROWS),
                       "next": [f"python3 router-dashboard/server.py --hermes-home {root} --port 8794",
                                "open http://127.0.0.1:8794/ and press Live"]}, indent=2))
     return 0
