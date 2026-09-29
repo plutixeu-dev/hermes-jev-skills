@@ -30,6 +30,7 @@ from typing import Any, Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import dispatch_store as ds  # noqa: E402
+import keys_store as ks  # noqa: E402
 import routing_store as rs  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -155,6 +156,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/models":
             self._json({"models": rs.model_catalog(self.cfg.hermes_home), "local": rs.local_models(self.cfg.hermes_home)})
             return
+        if path == "/api/keys/state":
+            self._json(ks.state(self.cfg.hermes_home, accepts_keys=_is_loopback(self.server.server_address[0])))
+            return
         if path == "/api/dispatch/state":
             self._json(ds.state(self.cfg.hermes_home))
             return
@@ -210,7 +214,28 @@ class Handler(BaseHTTPRequestHandler):
         try:
             payload = self._read_json()
         except Exception as exc:
-            self._json({"error": f"bad request: {exc}"}, 400)
+            # A keys request's body holds a key: its parse error is a fixed text, never the exception's.
+            self._json({"error": "bad request" if path.startswith("/api/keys/") else f"bad request: {exc}"}, 400)
+            return
+
+        if path in ("/api/keys/save", "/api/keys/check"):
+            if not isinstance(payload, dict) or payload.get("confirm") is not True:
+                self._json({"error": "keys routes need a JSON object with confirm:true"}, 400)
+                return
+            if path == "/api/keys/save" and not _is_loopback(self.server.server_address[0]):
+                self._json({"error": "this dashboard is not bound to loopback, so it takes no keys; open it "
+                                     "through the ssh tunnel `jev dashboard` prints, or run `jev setup-key`"}, 403)
+                return
+            provider = str(payload.get("provider") or "")
+            try:
+                if path == "/api/keys/save":
+                    self._json(ks.save(self.cfg.hermes_home, provider, payload.get("key")))
+                else:
+                    self._json(ks.check(self.cfg.hermes_home, provider))
+            except ValueError:
+                self._json({"error": "provider must be typesafe or openrouter"}, 400)
+            except Exception as exc:  # noqa: BLE001 - the type name only, never a message
+                self._json({"error": type(exc).__name__}, 500)
             return
 
         if path == "/api/jev/switch":

@@ -180,6 +180,47 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(code, 400)
 
 
+class KeysApiTestCase(ServerTestCase):
+    """The keys routes, on the same fixture. The state never reads a real secret store."""
+
+    def setUp(self):
+        for patch in (mock.patch.object(srv.ks.keystore, "resolve", lambda provider=None: None),
+                      mock.patch.object(srv.ks.keystore, "source", lambda provider=None: "absent")):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_keys_state_and_confirm(self):
+        code, body = self.call("/api/keys/state")
+        self.assertEqual((code, body["accepts_keys"]), (200, True))
+        self.assertEqual(self.call("/api/keys/save", {"provider": "openrouter", "key": "k" * 32})[0], 400)
+        self.assertEqual(self.call("/api/keys/check", {"provider": "openrouter"})[0], 400)
+
+    def test_keys_save_answers_without_the_key(self):
+        with mock.patch.object(srv.ks, "save", return_value={"ok": True, "status": "stored"}) as save:
+            code, body = self.call("/api/keys/save", {"provider": "openrouter", "key": "k" * 32, "confirm": True})
+        self.assertEqual((code, body), (200, {"ok": True, "status": "stored"}))
+        self.assertEqual(save.call_args[0][1:], ("openrouter", "k" * 32))
+
+    def test_a_server_not_on_loopback_takes_no_key(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with open(os.path.join(tmp.name, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(CFG)
+        httpd = srv.make_server("0.0.0.0", 0, srv.Config(tmp.name, "s3cret"))
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        req = urllib.request.Request("http://127.0.0.1:%d/api/keys/save" % httpd.server_address[1],
+                                     data=json.dumps({"provider": "openrouter", "key": "k" * 32,
+                                                      "confirm": True}).encode(), method="POST")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("X-Dashboard-Token", "s3cret")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(caught.exception.code, 403)
+        self.assertNotIn("k" * 32, caught.exception.read().decode())
+
+
 class PoolsEndpointTestCase(unittest.TestCase):
     """The grid the page draws comes from the server, so an empty specialty pool has to
     arrive as a cell, not be missing from the payload."""
