@@ -30,6 +30,7 @@ if _REPO_ROOT not in sys.path:
 from jevkit import dispatch, ladder  # noqa: E402
 from jevkit import agents as agents_mod  # noqa: E402
 
+import keys_store  # noqa: E402
 import routing_store  # noqa: E402
 
 AGENTS = ("claude", "openai", "openrouter")          # the order the page lists them
@@ -134,8 +135,8 @@ def _llm_execution_available() -> Optional[bool]:
 
 
 def _jev_routing_for(root: Path, home: Path, config_path: Path) -> str:
-    """hermes-jev's routing switch, read the way that plugin reads it (see hermes-dispatch's
-    own `_jev_routing_active`): the profile's own state, else the root's, else config.yaml."""
+    """hermes-jev's routing switch, read the way hermes-jev reads it: the profile's own state, else
+    the root's, else config.yaml."""
     root_state = _read_json(root / "jev" / "state.json")
     home_state = _read_json(home / "jev" / "state.json") if home != root else {}
     value = {**root_state, **home_state}.get("routing")
@@ -191,6 +192,30 @@ def _agent_rows(root_policy: Dict[str, Any], root_paths: Sequence[Path]) -> Dict
     return agents
 
 
+_NO_HANDOVER_APIS = ("codex_responses", "anthropic_messages")
+
+
+def _desk_warnings(mode: str, privacy_value: str, policy: Dict[str, Any], desk: Dict[str, Any],
+                   jev_route: str) -> List[str]:
+    """Why a Shadow or On front desk in this profile would still leave every turn on the receptionist."""
+    if mode not in ("shadow", "on"):
+        return []
+    out = []
+    if not desk.get("model"):
+        out.append("no_receptionist")
+    if privacy_value == "highly_sensitive":
+        out.append("privacy_only_here")
+    elif privacy_value == "private" and "private" not in (policy.get("jev_text_for") or []):
+        out.append("features_only")
+    if not any(isinstance(agent, dict) and agent.get("enabled") for agent in (policy.get("agents") or {}).values()):
+        out.append("no_agent")
+    if jev_route == "absent":
+        out.append("no_jev_key")
+    if desk.get("api") in _NO_HANDOVER_APIS:
+        out.append("no_handover")
+    return out
+
+
 def state(hermes_home: str) -> Dict[str, Any]:
     """Everything the dashboard shows: the fleet file, the agents, and every profile's own view."""
     root = Path(hermes_home)
@@ -199,6 +224,7 @@ def state(hermes_home: str) -> Dict[str, Any]:
     root_policy = dispatch.load_policy(paths=root_paths)
     agents = _agent_rows(root_policy, root_paths)
 
+    machine = keys_store.machine_keys()
     profiles: Dict[str, Any] = {}
     for name, home in routing_store._jev_homes(hermes_home):
         home_path = Path(home)
@@ -209,16 +235,26 @@ def state(hermes_home: str) -> Dict[str, Any]:
         profiles_map = policy.get("profiles") if isinstance(policy.get("profiles"), dict) else {}
         privacy_value = dispatch.privacy_class("", profile=name, policy=policy)[0]
         jev_routing = _jev_routing_for(root, home_path, config_path)
+        mode = _scoped_setting(state_path, config_path, paths, "mode", policy)
+        desk = routing_store.receptionist(str(config_path))
+        jev_route = keys_store.jev_route(str(home_path), machine)
         profiles[name] = {
             "home": str(home_path),
-            "mode": _scoped_setting(state_path, config_path, paths, "mode", policy),
+            "mode": mode,
             "notice": _scoped_setting(state_path, config_path, paths, "notice", policy),
             "privacy": {"value": privacy_value, "source": "dispatch.json" if name in profiles_map else "default"},
             "jev_routing": jev_routing,
-            "conflict": jev_routing in ("shadow", "on") and _plugin_enabled(config_path, "hermes-jev"),
+            # In a Shadow or On front desk profile routing asks nothing and swaps nothing (hermes-jev
+            # reads the same mode): information for the page, never a conflict to fix.
+            "routing_stands_aside": (jev_routing in ("shadow", "on") and mode["value"] in ("shadow", "on")
+                                     and _plugin_enabled(config_path, "hermes-jev")
+                                     and _plugin_enabled(config_path, "hermes-dispatch")),
             "plugin_enabled": _plugin_enabled(config_path, "hermes-dispatch"),
             "policy_files": [str(p) for p in paths],
             "broken_files": list(policy.get("broken_files") or []),
+            "receptionist": desk,
+            "jev_route": jev_route,
+            "warnings": _desk_warnings(mode["value"], privacy_value, policy, desk, jev_route),
         }
 
     return {
@@ -428,8 +464,44 @@ def _apply_locked(hermes_home: str, changes: Dict[str, Any], backup_root: Option
 # ------------------------------------------------------------------ live
 
 
-_EVENT_FIELDS = ("ts", "profile", "mode", "live", "agent", "model", "reason", "downgraded",
-                 "privacy", "privacy_why", "would_send_chars")
+_EVENT_FIELDS = ("ts", "profile", "mode", "live", "agent", "model", "reason", "downgraded", "privacy",
+                 "privacy_why", "would_send_chars", "chat_model", "api_mode", "handed_over")
+_JEV_FIELDS = ("call", "error", "latency_ms", "via", "model", "read", "tier", "specialty", "confidence")
+
+
+def _outcome(row: Dict[str, Any]) -> str:
+    """Who answered, as one word the page styles. A receptionist answer after a Jev failure, after a
+    downgrade, or in a profile whose class keeps every turn here, is a warning: a silent local answer
+    must not look like success."""
+    agent = row.get("agent") or dispatch.LOCAL
+    call = (row.get("jev") or {}).get("call")
+    if agent != dispatch.LOCAL:
+        if row.get("handed_over") or (row.get("handed_over") is None and row.get("live") is True):
+            return "agent"
+        return "would_be_agent" if row.get("mode") == "shadow" else "not_handed_over"
+    if call == "fail_open" or row.get("downgraded"):
+        return "receptionist_warning"
+    if (call == "not_called" and row.get("privacy") == "highly_sensitive"
+            and str(row.get("privacy_why") or "").startswith("profile ")):
+        return "receptionist_warning"
+    return "receptionist"
+
+
+def _window(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """The rows on screen in a few numbers: how often Jev was called, failed or not asked, who answered,
+    and Jev's mean latency. Enough to see at a glance that the chain works, or where it breaks."""
+    calls: Dict[str, int] = {}
+    outcomes: Dict[str, int] = {}
+    latencies = []
+    for event in events:
+        call = str(event["jev"].get("call") or "unknown")
+        calls[call] = calls.get(call, 0) + 1
+        outcomes[event["outcome"]] = outcomes.get(event["outcome"], 0) + 1
+        latency = event["jev"].get("latency_ms")
+        if isinstance(latency, (int, float)) and not isinstance(latency, bool):
+            latencies.append(latency)
+    return {"turns": len(events), "jev": calls, "outcomes": outcomes,
+            "latency_ms": round(sum(latencies) / len(latencies)) if latencies else None}
 
 
 def live(hermes_home: str, since: float = 0.0, limit: int = 100) -> Dict[str, Any]:
@@ -454,11 +526,19 @@ def live(hermes_home: str, since: float = 0.0, limit: int = 100) -> Dict[str, An
             row.setdefault("profile", name)
             reduced = {key: row.get(key) for key in _EVENT_FIELDS}
             reduced["niveau"] = (triage or {}).get("niveau")
+            reduced["source"] = (triage or {}).get("source")
+            jev = row.get("jev")
+            if isinstance(jev, dict):
+                reduced["jev"] = {key: jev[key] for key in _JEV_FIELDS if key in jev}
+            else:                           # a row from before 2026-09-29: only its reason tells
+                reduced["jev"] = {"call": "not_called" if "stood aside" in str(row.get("reason") or "") else "unknown"}
+            reduced["outcome"] = _outcome(reduced)
             reduced["attempts"] = [{"agent": a.get("agent"), "error": a.get("error")}
                                    for a in (row.get("attempts") or []) if isinstance(a, dict)]
             events.append(reduced)
     events.sort(key=lambda r: r.get("ts") or 0, reverse=True)
-    return {"now": time.time(), "events": events[:limit]}
+    events = events[:limit]
+    return {"now": time.time(), "events": events, "summary": _window(events)}
 
 
 # ------------------------------------------------------------------ cooldowns and a test call

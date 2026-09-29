@@ -178,7 +178,9 @@ class DispatchStoreTests(unittest.TestCase):
             self.assertEqual(profile["notice"], default_source)
             self.assertEqual(profile["privacy"], {"value": "highly_sensitive", "source": "default"})
             self.assertEqual(profile["jev_routing"], "off")
-            self.assertFalse(profile["conflict"])
+            self.assertFalse(profile["routing_stands_aside"])
+            self.assertEqual((profile["warnings"], profile["jev_route"]), ([], "absent"))
+            self.assertEqual(profile["receptionist"]["model"], "x")
             self.assertFalse(profile["plugin_enabled"])
             self.assertEqual(profile["broken_files"], [])
         self.assertEqual(out["profiles"]["default"]["home"], self.home)
@@ -272,19 +274,30 @@ class DispatchStoreTests(unittest.TestCase):
         self.write_config("wiki", enabled=["hermes-jev"], settings={"hermes-jev": {"routing": "on"}})
         self.assertEqual(ds.state(self.home)["profiles"]["wiki"]["jev_routing"], "on")
 
-    # -- conflict: dispatch and hermes-jev's routing --------------------------
-    def test_conflict_when_routing_is_on_and_hermes_jev_is_enabled(self):
+    # -- the front desk goes first ------------------------------------------
+    def test_routing_stands_aside_where_the_front_desk_decides(self):
         self.write_jev_state("wiki", {"routing": "on"})
-        self.write_config("wiki", enabled=["hermes-jev"])
+        self.write_config("wiki", enabled=["hermes-jev", "hermes-dispatch"])
+        self.assertFalse(ds.state(self.home)["profiles"]["wiki"]["routing_stands_aside"])     # front desk off
+        self.write_state("wiki", {"mode": "shadow"})
         profile = ds.state(self.home)["profiles"]["wiki"]
-        self.assertEqual(profile["jev_routing"], "on")
-        self.assertTrue(profile["conflict"])
+        self.assertTrue(profile["routing_stands_aside"])
+        self.assertNotIn("conflict", profile)
 
-    def test_no_conflict_when_hermes_jev_is_not_enabled(self):
-        self.write_jev_state("wiki", {"routing": "shadow"})
-        profile = ds.state(self.home)["profiles"]["wiki"]
-        self.assertEqual(profile["jev_routing"], "shadow")
-        self.assertFalse(profile["conflict"])
+    def test_a_front_desk_that_would_leave_every_turn_here_says_why(self):
+        self.write_state("wiki", {"mode": "on"})
+        self.assertEqual(ds.state(self.home)["profiles"]["wiki"]["warnings"],
+                         ["privacy_only_here", "no_agent", "no_jev_key"])
+        self.write_fleet({"profiles": {"wiki": "private"}, "agents": {"claude": {"enabled": True}}})
+        with open(os.path.join(self._profile_home("wiki"), ".env"), "w", encoding="utf-8") as fh:
+            fh.write("OPENROUTER_API_KEY=" + "k" * 32 + "\n")
+        self.assertEqual(ds.state(self.home)["profiles"]["wiki"]["warnings"], ["features_only"])
+
+    def test_a_chatgpt_receptionist_cannot_hand_over_yet(self):
+        self.write_state("wiki", {"mode": "shadow"})
+        with open(os.path.join(self._profile_home("wiki"), "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("model:\n  provider: openai-codex\n  default: gpt-5.5\n")
+        self.assertIn("no_handover", ds.state(self.home)["profiles"]["wiki"]["warnings"])
 
     # -- set_switch ------------------------------------------------------------
     def test_set_switch_for_one_profile_writes_only_that_file(self):
@@ -452,6 +465,9 @@ class DispatchStoreTests(unittest.TestCase):
                   "reason": "frontier work", "downgraded": False, "privacy": "private", "privacy_why": "profile x",
                   "would_send_chars": 42, "triage": {"niveau": "frontier", "type": "CHANGE"},
                   "attempts": [{"agent": "openai", "error": "quota", "extra": "nope"}],
+                  "chat_model": "qwen3.5:4b", "api_mode": "chat_completions", "handed_over": True,
+                  "jev": {"call": "called", "latency_ms": 412, "via": "openrouter", "read": "text", "tier": "hard",
+                          "specialty": "coding", "confidence": 0.9, "prompt": "must never appear"},
                   "text": "must never appear", "session": "must never appear", "prompt": "must never appear"})
         out = ds.live(self.home)
         self.assertEqual(len(out["events"]), 1)
@@ -459,10 +475,48 @@ class DispatchStoreTests(unittest.TestCase):
         self.assertEqual(event, {"ts": 2, "profile": "default", "mode": "on", "live": True, "agent": "openai",
                                  "model": "gpt-6", "reason": "frontier work", "downgraded": False,
                                  "privacy": "private", "privacy_why": "profile x", "would_send_chars": 42,
-                                 "niveau": "frontier", "attempts": [{"agent": "openai", "error": "quota"}]})
+                                 "chat_model": "qwen3.5:4b", "api_mode": "chat_completions", "handed_over": True,
+                                 "niveau": "frontier", "source": None,
+                                 "jev": {"call": "called", "latency_ms": 412, "via": "openrouter", "read": "text",
+                                         "tier": "hard", "specialty": "coding", "confidence": 0.9},
+                                 "outcome": "agent", "attempts": [{"agent": "openai", "error": "quota"}]})
         blob = json.dumps(out)
         for leaked in ("must never appear", "type", "CHANGE", "extra", "nope"):
             self.assertNotIn(leaked, blob)
+
+    def test_live_names_who_answered_and_flags_a_silent_receptionist(self):
+        rows = [
+            {"ts": 1, "kind": "dispatch", "mode": "on", "live": True, "handed_over": True, "agent": "claude",
+             "jev": {"call": "called", "tier": "hard"}},
+            {"ts": 2, "kind": "dispatch", "mode": "shadow", "agent": "claude", "jev": {"call": "called"}},
+            {"ts": 3, "kind": "dispatch", "mode": "on", "live": False, "agent": "openai", "api_mode": "codex_responses",
+             "jev": {"call": "called"}},
+            {"ts": 4, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "fail_open", "error": "rate_limited"}},
+            {"ts": 5, "kind": "dispatch", "mode": "on", "agent": "local", "downgraded": True, "jev": {"call": "called"}},
+            {"ts": 6, "kind": "dispatch", "mode": "on", "agent": "local", "privacy": "highly_sensitive",
+             "privacy_why": "profile default is not classified, so highly_sensitive", "jev": {"call": "not_called"}},
+            {"ts": 7, "kind": "dispatch", "mode": "on", "agent": "local", "reason": "pinned: …", "jev": {"call": "not_called"}},
+            {"ts": 8, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "called", "tier": "medium"}},
+            {"ts": 9, "kind": "dispatch", "mode": "on", "agent": "local", "reason": "stood aside: /jev routing is on"},
+        ]
+        self.log("default", *rows)
+        out = {e["ts"]: e for e in ds.live(self.home)["events"]}
+        self.assertEqual([out[ts]["outcome"] for ts in range(1, 10)],
+                         ["agent", "would_be_agent", "not_handed_over", "receptionist_warning", "receptionist_warning",
+                          "receptionist_warning", "receptionist", "receptionist", "receptionist"])
+        self.assertEqual(out[9]["jev"], {"call": "not_called"})                 # a row from before this change
+
+    def test_live_sums_up_the_window_so_a_broken_chain_shows_at_a_glance(self):
+        self.log("default",
+                 {"ts": 1, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "called", "latency_ms": 400}},
+                 {"ts": 2, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "called", "latency_ms": 600}},
+                 {"ts": 3, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "fail_open", "error": "timeout"}},
+                 {"ts": 4, "kind": "dispatch", "mode": "on", "live": True, "handed_over": True, "agent": "claude",
+                  "jev": {"call": "called", "latency_ms": 500}})
+        summary = ds.live(self.home)["summary"]
+        self.assertEqual(summary, {"turns": 4, "jev": {"called": 3, "fail_open": 1},
+                                   "outcomes": {"receptionist": 2, "receptionist_warning": 1, "agent": 1},
+                                   "latency_ms": 500})
 
     def test_live_honours_since_and_sorts_newest_first(self):
         self.log("default", {"ts": 1, "kind": "dispatch", "agent": "local"},
