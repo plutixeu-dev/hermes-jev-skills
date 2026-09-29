@@ -304,6 +304,18 @@ What that needs, beyond this spec:
 - **The fallback** is Hermes's own `fallback_providers`. This spec already reads a fallback
   model as the receptionist, never as a pin.
 
+The research of 2026-09-29 (`docs/superpowers/research/2026-09-29-jev-routers-compared.md`)
+found working, licensed references for each of these pieces:
+
+- the Responses stream: Switchboard (Apache-2.0), gargpratyush (MIT), auto-model-router (MIT);
+- quota pacing: hyspacex and auto-model-router, both MIT;
+- effort per agent: upstream 0.22's `effort.py`, and Switchboard.
+
+It adds two items to the next spec:
+
+- **follow-up turns stay with the agent that answered the last one**;
+- **merging upstream 0.22 first.**
+
 ## Testing
 
 - **Offline, unittest, fake transports.** Nothing listens on 11434 in tests; the Ollama helper

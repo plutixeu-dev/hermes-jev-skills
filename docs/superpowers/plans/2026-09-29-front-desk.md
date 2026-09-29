@@ -22,6 +22,13 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-29-dashboard-chat-model-keys-quiet-jev-design.md` (parts 1, 3 and 5, as amended on 2026-09-29).
 
+**Research:** `docs/superpowers/research/2026-09-29-jev-routers-compared.md` compares about 30 Jev routers and the Jev docs with this design. Three findings are adopted in this plan:
+- Task 9's window summary;
+- Task 9b, the Jev client as the docs describe it;
+- Task 10's health line and error texts.
+
+The rest is the next plan, listed at the end.
+
 ---
 
 ## Samenvatting voor Sander
@@ -2002,9 +2009,58 @@ def _outcome(row: Dict[str, Any]) -> str:
             reduced["attempts"] = [...]     # unchanged
 ```
 
+  - From the research (jev-gateway's health card): `live()` also returns `summary`, computed by `_window(events)`. It holds the turns in the window, a count per `jev.call`, a count per `outcome`, and the mean Jev latency. Test:
+
+```python
+    def test_live_sums_up_the_window_so_a_broken_chain_shows_at_a_glance(self):
+        self.log("default",
+                 {"ts": 1, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "called", "latency_ms": 400}},
+                 {"ts": 2, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "called", "latency_ms": 600}},
+                 {"ts": 3, "kind": "dispatch", "mode": "on", "agent": "local", "jev": {"call": "fail_open", "error": "timeout"}},
+                 {"ts": 4, "kind": "dispatch", "mode": "on", "live": True, "handed_over": True, "agent": "claude",
+                  "jev": {"call": "called", "latency_ms": 500}})
+        summary = ds.live(self.home)["summary"]
+        self.assertEqual(summary, {"turns": 4, "jev": {"called": 3, "fail_open": 1},
+                                   "outcomes": {"receptionist": 2, "receptionist_warning": 1, "agent": 1},
+                                   "latency_ms": 500})
+```
+
 - [ ] **Step 4: Run** `router-dashboard/tests`, then the three global commands.
 
 - [ ] **Step 5: Commit.** Stage `router-dashboard/dispatch_store.py router-dashboard/tests/test_dispatch_store.py`. Message: `dashboard: the front desk's receptionist, warnings and one live row per turn`.
+
+---
+
+### Task 9b: The Jev client, as the docs describe it (from the research)
+
+The official schema, the TypeSafe SDK and the OpenRouter docs show five gaps (research doc, "What the Jev docs say about our client"). Only the first changes a decision, and it only makes one safer.
+
+**Files:**
+- Modify: `jevkit/client.py`, `jevkit/agents.py`, `jevkit/dispatch.py`, `jevkit/route.py`, `jevkit/turn.py`, `hermes/plugin/hermes-jev/__init__.py`, `hermes/plugin/hermes-dispatch/__init__.py`, `router-dashboard/dispatch_store.py`, `router-dashboard/keys_store.py`
+- Tests: `tests/test_jevkit.py`, `tests/test_agents.py`, `tests/test_dispatch.py`, `router-dashboard/tests/test_keys_store.py`
+
+- [ ] **Step 1: Write the failing tests.**
+  - `tests/test_jevkit.py`:
+    - A score answer without `confidence` comes back with confidence 0.0. With no spread either, `route.judge_answers` gives `tier: None` for a harmless turn; today it gives `simple`.
+    - A reply carrying `"model": "typesafe/jev-1.13-20260917"` and `"usage": {"cost": 0.00002}` gives `reply["build"]` and `reply["cost"]`.
+    - `client._status_code` maps 401 to `auth_failed`, 403 to `forbidden`, 413 to `state_too_large` and 402 to `credits_exhausted`.
+    - `http_408` and `http_524` are in `client._RETRYABLE`.
+  - `tests/test_agents.py`: an OpenRouter agent call whose `client.post` raises `JevError("forbidden")` fails with the code `auth`, as a 403 did before.
+  - `tests/test_dispatch.py`: with the `Wire` fake, whose reply says `"model": "jev-test"`, `record["jev"]["build"] == "jev-test"`.
+  - `router-dashboard/tests/test_keys_store.py`: a check whose reply names a build returns it as `build`.
+- [ ] **Step 2: Run and see them fail.**
+- [ ] **Step 3: Implement.**
+  - **`client._check_answer`:** a missing score `confidence` becomes 0.0. The schema requires it, and a reply without it is no evidence of certainty.
+  - **`client.ask`:**
+    - returns `build`: the payload's `model` when it is a string, "the exact build that answered";
+    - returns `cost`: `usage.cost` when it is a number;
+    - `"via"` and `"model"` stay.
+  - **Status codes:** move the status map into `_status_code(status)`, add `403: "forbidden"` and `413: "state_too_large"`, and add `"http_408"` and `"http_524"` to `_RETRYABLE`.
+  - **`agents.run_openrouter`:** maps `forbidden` to `auth` too.
+  - **The Jev block:** `classify_with_jev` puts `build` in the `called` block. `_JEV_KEPT` in hermes-dispatch and `_JEV_FIELDS` in `dispatch_store` keep `build`. `keys_store.check` returns `build`.
+  - **Comments:** in `route.questions`, in `turn.py`'s module docstring and in hermes-jev's merge comment, "Jev charges per request" becomes "combining saves a round trip; Jev bills input tokens, about $0.00002 a call".
+- [ ] **Step 4: Run** the tests, then the three global commands.
+- [ ] **Step 5: Commit.** Message: `jev client: an answer without confidence is unsure; the build that answered, 403 and 413 named, 408 and 524 retried`.
 
 ---
 
@@ -2133,6 +2189,8 @@ function dispLiveRow(e, fresh){
 }
 ```
 
+  9. **The health line (from the research).** Add `#deskHealth` above the live table. From `summary`, it reads: "Last N turns: Jev called X (mean Y ms) · fail-open F · not asked Z · handed over H · answered here R (W warnings)". It uses the warning style when every turn in the window failed open or was not asked, because a silent local 4B must not look like success.
+
 - [ ] **Step 4: The Jev routing card** gets `<div class="small" id="jevDesk"></div>` under `#jevCounts`. At the end of `renderSwitch`:
 
 ```js
@@ -2227,6 +2285,20 @@ async function keyCheck(name){
   renderKeys();
 }
 ```
+
+  From the research, a failed check says what the code means:
+
+  | Code | Text |
+  |---|---|
+  | `auth_failed` | "the key was refused" |
+  | `forbidden` | "the key may not use this model" |
+  | `credits_exhausted` | "no credit left" |
+  | `rate_limited` | "rate limited, try again in a minute" |
+  | `network`, `timeout` | "Jev could not be reached from this machine" |
+  | `http_404`, `http_410` | "this model id is not served (jev-latest moved?)" |
+  | `no_key` | "no key stored" |
+
+  A passed check shows the build that answered.
 
 - [ ] **Step 6: The local group** in the Main model card.
   - Add `<div id="localBox" style="margin-top:10px"></div>` under its table.
@@ -2379,3 +2451,22 @@ This task writes no code. It needs Step 0's output, and Sander at the chat, beca
 | The guides, installer and changelog | 11 |
 | Acceptance 1 to 4 | 12 |
 | Situation 2 (the ChatGPT receptionist plans and reviews, local models execute) | recorded in the spec; the next plan |
+| Research: window summary, health line, the Jev client per the docs, error texts | 9, 9b, 10 |
+
+## The next plan (from the research of 2026-09-29)
+
+In the order that pays off soonest. Each item names its source in the research doc.
+
+1. **Merge upstream hermes-jev-skills 0.22.** It already ships `jevkit/effort.py` (a difficulty-to-effort table, measured), `limits.py` (Jev spend limits) and ladder fixes. This fork is on 0.19.0 and has diverged in the two plugins and in `jevkit/dispatch.py`, `privacy.py` and `agents.py`; expect conflicts there. Do it first, so later items build on upstream's code rather than beside it.
+2. **Follow-up turns stay with the agent that answered the last one.** "Yes, do it" after a Claude Code plan must not fall back to the 4B.
+   - The mechanism: a fourth question in the same request, `is_followup` (noul), gated at 0.55 as jcm-router does. Or send hyspacex's earlier-request field.
+   - Decide first what happens for private turns. There Jev reads features, not text, and a follow-up cannot be judged from features.
+3. **Reasoning effort per agent,** asked in the same request (Switchboard's pattern), clamped to what each CLI takes. Pass it on as `claude --effort` and `codex exec -c model_reasoning_effort=…`. Default medium, cap high.
+4. **Situation 2, the ChatGPT receptionist.**
+   - Hand a turn over from `codex_responses` with a Responses stream (`response.created` … `response.completed`, one stable id). Use a contract test against Hermes's `_normalize_codex_response`.
+   - A local Ollama agent.
+   - An offload policy: routine execution goes local, planning and review stay with the receptionist.
+   - A quota pace from the `x-codex-*` and `anthropic-ratelimit-unified-*` headers, so work moves before a limit (hyspacex `quota.py`, MIT).
+5. **Pin the Jev build** (`jev-1.13.0` / `typesafe/jev-1.13`) after a shadow day on it. Give each provider its own model override.
+6. **Measure before On:** a counterfactual cost per turn, a threshold replay over the log (log the level probabilities first), and a separate view of Dutch turns.
+7. **Optional:** a verify-then-escalate cascade for the 4B, a Jev circuit breaker, and a mock Jev for end-to-end tests without a key.
