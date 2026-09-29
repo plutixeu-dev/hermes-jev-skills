@@ -2415,6 +2415,8 @@ async function keyCheck(name){
 
 ### Task 12: Acceptance on the NAS
 
+The same four checks run offline first, in `tests/test_front_desk_acceptance.py`: both plugins registered with a stand-in for Hermes, one turn in Hermes's hook order, a fake Jev reached through OpenRouter and a fake Claude Code. Against the code before Task 1 that file fails exactly as the incident did.
+
 This task writes no code. It needs Step 0's output, and Sander at the chat, because it involves a gateway restart and real turns. Keep the notes in `docs/superpowers/plans/2026-09-29-front-desk-acceptance.md` (decisions and timestamps only, no message text), and commit that file.
 
 - [ ] **Step 1: Update and install.**
@@ -2428,9 +2430,9 @@ This task writes no code. It needs Step 0's output, and Sander at the chat, beca
 - [ ] **Step 4: The front desk.**
   - Privacy for the profile: "May go to an agent". Use "Public" for this run only if Sander wants Jev to read the redacted text.
   - Agents: Claude Code on, model `opus`, "Only repository work" off.
-  - Preview dispatch changes → Confirm & save, then Test Claude: `ok`.
+  - Preview front desk changes → Confirm & save, then Test Claude: `ok`.
   - Switch the front desk to Shadow. The warnings list is empty, or says only `features_only` for a private profile.
-  - `/jev` in the chat shows `skills: off`.
+  - `/jev` in the chat shows `skills: off`. Skill selection asks Jev its own question, so with skills on a turn makes two requests and acceptance 1 cannot hold.
 - [ ] **Step 5: Acceptance 1.** Sander sends a hard coding task, for example the Plutix page task.
   - OpenRouter's activity page shows exactly one `~typesafe/jev-latest` request at that time.
   - `grep '"kind":"dispatch"' ~/.hermes/logs/jev-decisions.jsonl | tail -n 1 | python3 -m json.tool` shows `jev.call: "called"`, a `jev.tier`, a `jev.specialty` and a number for `jev.latency_ms`.
@@ -2473,6 +2475,8 @@ This task writes no code. It needs Step 0's output, and Sander at the chat, beca
 | Research: window summary, health line, the Jev client per the docs, error texts | 9, 9b, 10 |
 
 ## The next plan (from the research of 2026-09-29)
+
+- **Skill selection in the front desk's request.** With `/jev skills on`, a front desk turn makes a second Jev request for its skill. Asking skill selection's stage 1 in the front desk's one request, as `turn.decide_turn` does for routing, keeps one request per turn.
 
 In the order that pays off soonest. Each item names its source in the research doc.
 
