@@ -14,7 +14,7 @@ A person pointed you here to give their agent Jev. Follow these steps in order. 
    git clone https://github.com/plutixeu-dev/hermes-jev-skills ~/hermes-jev-skills
    ```
 
-2. **Preview, then install.** Show the person what `--check` reports before running the real thing. It detects Hermes, Claude Code and Codex and installs for each. On Hermes it installs every plugin this repo ships (`hermes-jev` for routing, `hermes-handoff` for end-of-session capsules, `hermes-dispatch` for handing hard turns to another agent, which stays off until someone runs `/dispatch shadow`) plus `scripts/nightly-handoff.py` under the Hermes home, and edits one list (`plugins.enabled`) in each `config.yaml`, with a timestamped backup beside it.
+2. **Preview, then install.** Show the person what `--check` reports before running the real thing. It detects Hermes, Claude Code and Codex and installs for each. On Hermes it installs every plugin this repo ships (`hermes-jev` for routing, `hermes-handoff` for end-of-session capsules, `hermes-dispatch` for handing hard turns to another agent, which stays off until the person sets it to Shadow in the dashboard) plus `scripts/nightly-handoff.py` under the Hermes home, and edits one list (`plugins.enabled`) in each `config.yaml`, with a timestamped backup beside it.
 
    ```bash
    python3 ~/hermes-jev-skills/install.py --check
@@ -60,7 +60,7 @@ A person pointed you here to give their agent Jev. Follow these steps in order. 
 
    - Plugins load when a session or gateway starts. Say that a running gateway needs one restart, and do not restart it unless the person asks.
    - Run `jev dispatch check` and tell them which of `claude`, `codex` and OpenRouter this machine can reach. A missing login is theirs to do in their own terminal: `claude` or `claude setup-token`, and `codex login`.
-   - Run `jev dashboard`. It serves http://127.0.0.1:8791 on this machine only, and prints an `ssh -N -L …` line for opening it from another computer; relay that line. In the **Receptionist dispatch** card they choose privacy per profile, agents and order, then Preview, Confirm & save, Test, and Shadow. After a day of decisions, On. They change it there, not in chat.
+   - Run `jev dashboard`. It serves http://127.0.0.1:8791 on this machine only, and prints an `ssh -N -L …` line for opening it from another computer; relay that line. In the **Receptionist dispatch** card they choose privacy per profile, agents and order, then Preview, Confirm & save, Test, and Shadow. After a day of decisions, On. They change it there, not in chat. [docs/receptie.md](docs/receptie.md) is the person's guide to that card, in Dutch; point them to it.
 
 6. **Jev routing, only if the person chooses it instead.** Jev routing picks a model inside one provider. It must not run beside the receptionist in the same profile, because each turn gets one classifier. Only when the person picks it over the receptionist:
 

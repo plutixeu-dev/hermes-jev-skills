@@ -7,6 +7,8 @@ Deze fork (`plutixeu-dev/hermes-jev-skills`) is de originele hermes-jev-skills (
 - hoe je de modellen en logins koppelt;
 - wat je moet doen voordat de receptie werkt. Het is niet plug-and-play; reken op ongeveer een halfuur, plus een dag kijken in de proefstand.
 
+Wil je alleen weten waar de receptie zit en hoe je hem bedient? Lees dan [receptie.md](receptie.md).
+
 ## 1. Wat deze fork toevoegt aan het origineel
 
 | Onderdeel | Origineel | Deze fork |
@@ -93,6 +95,8 @@ Sleutels plak je altijd zelf op die pagina, nooit in een chat. Het dashboard too
 De link werkt tien minuten. Is hij verlopen, draai `jev setup-key` dan opnieuw: je krijgt een nieuwe poort, dus ook een nieuwe tunnelregel.
 
 ## 5. Instellen in het dashboard
+
+Dit is de korte versie. Elke knop, de bestanden en een tabel met problemen en oplossingen staan in [receptie.md](receptie.md).
 
 1. Start `jev dashboard` en open `http://127.0.0.1:8791` in je browser op dezelfde machine. Werk je vanaf een andere computer, bijvoorbeeld omdat Hermes op een NAS draait? Dan toont `jev dashboard` een regel `ssh -N -L 8791:127.0.0.1:8791 …`. Voer die uit op je eigen computer, laat het venster open, en open daar `http://127.0.0.1:8791`. Voor een privénetwerk zoals Tailscale: zie [router-dashboard/README.md](../router-dashboard/README.md), onderdeel "Off your own machine".
 2. Kijk in het blok **Receptionist dispatch** eerst bij **Checks**:

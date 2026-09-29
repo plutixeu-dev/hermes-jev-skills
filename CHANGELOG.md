@@ -15,6 +15,13 @@
   `jev models suggest --write` and `/jev routing shadow` appear only as the alternative to the receptionist. Until now the list led an agent to turn on Jev routing beside the receptionist, which gives one turn two classifiers. `AGENTS.md` follows the same order.
 - **`jev setup-key` on a machine without a browser.** It adds `from_another_computer`, an `ssh -N -L` line with this machine's address and the page's port, plus `without_a_browser` (`jev setup-key --tty`) and `expires_in_s`. Its `say` field covers both ways in and names the right provider. `jev dashboard` prints the same tunnel line for its own port.
 - **`jev doctor` says what to do next.** It gets a `next` field when the key is missing or Jev does not answer.
+- **`docs/receptie.md`**, a guide in Dutch to the receptionist. It covers:
+  - where each part lives;
+  - how to reach the dashboard from another computer;
+  - every control in the card;
+  - a first setup;
+  - daily use;
+  - a table of problems and their fixes.
 
 **Receptionist dispatch: a hard turn goes to the agent that should answer it**
 
