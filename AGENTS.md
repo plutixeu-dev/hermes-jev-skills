@@ -4,7 +4,7 @@ A person pointed you here to give their agent Jev. Follow these steps in order. 
 
 ## The one rule
 
-**You never see the person's TypeSafe API key.** Do not ask for it in chat. Do not read it from any file or secret store. Do not put it in a command, URL or config. If they paste it to you anyway: do not store or repeat it, tell them to replace that key at https://console.typesafe.ai/settings/keys, and continue with step 3, which is the only way a key gets in.
+**You never see the person's TypeSafe API key.** Do not ask for it in chat. Do not read it from any file or secret store. Do not put it in a command, URL or config. If they paste it to you anyway: do not store or repeat it, tell them to replace that key at https://console.typesafe.ai/settings/keys, and continue with step 3. That, or the person pasting it into the dashboard's Keys card themselves, is the only way a key gets in.
 
 ## Steps
 
@@ -56,20 +56,25 @@ A person pointed you here to give their agent Jev. Follow these steps in order. 
 
    `key.present` and `jev.reachable` must both be true.
 
-5. **Hermes: the receptionist, set up in the dashboard.** This fork's `hermes-dispatch` hands a hard turn to Claude Code, Codex or OpenRouter when privacy allows, and keeps the rest on the local model. It is off after install.
+5. **Hermes: the front desk, set up in the dashboard.** This fork's `hermes-dispatch` is the front desk. The receptionist, the profile's chat model, keeps the chat. Each ordinary turn asks Jev once, and a turn Jev judges hard goes to Claude Code, Codex or OpenRouter when privacy allows. The chat model never changes. It is off after install.
 
    - Plugins load when a session or gateway starts. Say that a running gateway needs one restart, and do not restart it unless the person asks.
    - Run `jev dispatch check` and tell them which of `claude`, `codex` and OpenRouter this machine can reach. A missing login is theirs to do in their own terminal: `claude` or `claude setup-token`, and `codex login`.
-   - Run `jev dashboard`. It serves http://127.0.0.1:8791 on this machine only, and prints an `ssh -N -L …` line for opening it from another computer; relay that line. In the **Receptionist dispatch** card they choose privacy per profile, agents and order, then Preview, Confirm & save, Test, and Shadow. After a day of decisions, On. They change it there, not in chat. [docs/receptie.md](docs/receptie.md) is the person's guide to that card, in Dutch; point them to it.
+   - Run `jev dashboard`. It serves http://127.0.0.1:8791 on this machine only, and prints an `ssh -N -L …` line for opening it from another computer; relay that line. There, in this order:
+     1. **Keys:** Check sends one real decisions request to Jev, the way a turn does, and says what failed in words. A key still missing is pasted there by the person, never in chat.
+     2. **Main model:** the receptionist. A local Ollama model is fine: the Local (Ollama) list writes its provider and base_url with it. A new receptionist reaches a running gateway after its next restart.
+     3. **Front desk:** privacy per profile, agents and order, then Preview, Confirm & save, Test, and Shadow. After a day of decisions, On.
 
-6. **Jev routing, only if the person chooses it instead.** Jev routing picks a model inside one provider. It must not run beside the receptionist in the same profile, because each turn gets one classifier. Only when the person picks it over the receptionist:
+     They change it there, not in chat. The Front desk card's table has one row per turn: whether Jev was called, what it judged, and who answered. [docs/receptie.md](docs/receptie.md) is the person's guide, in Dutch; point them to it.
+
+6. **Jev routing, only if the person chooses it for a profile without a front desk.** Jev routing picks a model inside one provider. Each turn gets one classifier: where the front desk is Shadow or On, routing stands aside by itself, and `/jev` says so. Only when the person picks it for a profile without a front desk:
 
    - If `routing.tiers_configured` is empty, run `jev models suggest --write`. Show the person the pools, and ask whether they want specific models first for coding, writing, research or vision. Copy model ids from `jev models list --search <name>`; never invent one.
    - Tell them to run `/jev routing shadow` in a new session, watch a day of decisions in `logs/jev-decisions.jsonl`, then `/jev routing on`.
 
    **Nightly handoff (Hermes).** `scripts/nightly-handoff.py` is copied into the Hermes home, but nothing schedules it and nothing runs it for them. Show them `python3 ~/.hermes/scripts/nightly-handoff.py --dry-run`, and add a cron or launchd entry only if they ask for one.
 
-7. **Report** in three or four sentences: what was installed where, any warning the installer printed and any link it replaced, that the key is connected, whether the receptionist or Jev routing is set up (and in which mode), and what needs a restart.
+7. **Report** in three or four sentences: what was installed where, any warning the installer printed and any link it replaced, that the key is connected and what Keys → Check said, each profile's receptionist and the front desk's mode (or Jev routing's, where the person chose it), and what needs a restart.
 
 ## Using it afterwards
 

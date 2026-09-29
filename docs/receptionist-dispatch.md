@@ -1,9 +1,10 @@
 # Receptionist dispatch
 
-A front desk for a Hermes chat whose own model is local. Most turns stay on the local model.
-A turn that Jev judges hard can go to another agent: Codex on a ChatGPT login, Claude Code on
-a Claude login, or OpenRouter. That agent's answer comes back unchanged, with one line on top
-that names who wrote it.
+A front desk for a Hermes chat. The receptionist, the profile's chat model (often a local one),
+keeps the chat and answers most turns. Each ordinary turn asks Jev once. A turn that Jev judges
+hard can go to another agent: Codex on a ChatGPT login, Claude Code on a Claude login, or
+OpenRouter. That agent's answer comes back unchanged, with one line on top that names who wrote
+it. The chat model never changes. The dashboard calls this the Front desk.
 
 It is off by default. No agent is enabled and no model is filled in. A profile you did not
 classify stays fully local.
@@ -21,7 +22,7 @@ Three parts, kept apart on purpose.
    hard (level `frontier`) can leave. If Jev is down or slow, the turn counts as standard work
    and stays here.
 3. **Run and relay.** The chosen agent gets a redacted handoff on stdin. Its answer comes back
-   as it is. The local model does not retell it, so no number, warning or decision changes on
+   as it is. The receptionist does not retell it, so no number, warning or decision changes on
    the way.
 
 The `hermes-dispatch` plugin runs these parts on the first provider call of each new user
@@ -60,7 +61,9 @@ This file says:
 - Codex and Claude Code are on. OpenRouter is off.
 
 Fill in a model id your own login lists. Never invent one. An empty model means the CLI's own
-default. OpenRouter needs a model.
+default. OpenRouter needs a model. OpenRouter's own `typesafe/jev-router` works there too:
+OpenRouter then picks a model and effort per request. It fails when Jev fails, and the turn is
+answered here.
 
 The file can live in three places. Each one is laid over the one before, setting by setting,
 so the last one wins:
@@ -150,16 +153,73 @@ OpenRouter takes public turns only. That rule follows its kind, not the name you
 
 ## One classifier per turn
 
-hermes-jev routing (`/jev routing`) asks Jev about every turn as well. Two classifiers on one
-turn cost two calls, and they can disagree. The reasoning library's rule is one classifier per
-message.
+hermes-jev routing (`/jev routing`) asks Jev about every turn as well, and swaps the model. Two
+classifiers on one turn cost two calls, and they can disagree. The reasoning library's rule is
+one classifier per message.
 
-So while routing is on or in shadow, dispatch stands aside. It logs `stood aside`, and the
-local call goes ahead. It reads routing the way hermes-jev does: a `/jev routing` switch first,
-then `routing` in config.yaml. That counts only while hermes-jev is loaded: when Hermes says
-the plugin is gone, a switch left behind no longer silences dispatch.
+The front desk goes first. In a profile whose front desk is Shadow or On, routing stands aside:
+it asks Jev nothing and swaps nothing, and `/jev` says so. Both plugins read the front desk's
+mode with one rule, `jevkit/frontdesk.desk_mode`: a `/dispatch` switch, then config.yaml, then
+`dispatch.json`, then off. So they can never both decide, and never both stand aside. When
+Hermes says hermes-dispatch is not loaded, routing does not stand aside for a switch left
+behind.
 
-Turn routing off before you turn dispatch on.
+Dispatch never stands aside. Rows logged before this change may still say `stood aside`; the
+dashboard reads them as turns where Jev was not called.
+
+## The pin
+
+A chat pins a model with Hermes's `/model`: a session override that wins over config.yaml for
+that chat only. (`/model --global` writes config.yaml instead, which changes the receptionist.)
+In a pinned chat the person chose who answers. So the front desk asks Jev nothing and hands
+nothing over there, and the row says `pinned`. Other chats keep their front desk.
+
+The receptionist is never a pin, and neither is its fallback chain. `fallback_providers`, or the
+older `fallback_model`, answers when the receptionist cannot, and a fallback turn is still the
+front desk's. The comparison strips only a known provider prefix, so an Ollama tag such as
+`qwen3.5:4b` is part of the model's name.
+
+On 2026-09-29 that went wrong twice over:
+- The colon in the tag was read as a provider prefix. The receptionist looked pinned, and
+  routing kept it without asking Jev.
+- Dispatch stood aside for routing.
+
+Nobody asked Jev, and the 4B answered a long coding task alone. `jevkit/frontdesk.is_pinned` is
+the one rule both plugins use now.
+
+## What each row says
+
+Each ordinary turn in a Shadow or On profile logs one row, `"kind":"dispatch"`, in the profile's
+`logs/jev-decisions.jsonl`. It holds decisions only, never a message or an answer.
+
+| Field | What it says |
+|---|---|
+| `mode`, `live` | the mode in force; whether this turn could be handed over (`on`, and a `chat_completions` receptionist) |
+| `chat_model`, `api_mode` | the model the chat ran and the API Hermes used for it; the front desk never changes either |
+| `jev` | what Jev did (see below) |
+| `agent`, `model` | who answered, or in Shadow who would have; `local` is the receptionist |
+| `handed_over` | true when an agent's answer became the reply |
+| `reason` | why: `pinned: …`, `skipped: a subagent's turn`, `frontier work for claude`, `standard work stays on this machine`, and so on |
+| `privacy`, `privacy_why` | the turn's class and why |
+| `triage` | the TRIAGE record: level, kind and where the judgement came from |
+| `attempts` | each agent tried, and its error |
+
+`jev.call` is one of three:
+- `called`. It comes with:
+  - `latency_ms`;
+  - `via`, `typesafe` or `openrouter`;
+  - `model`, the alias asked for;
+  - `build`, the build that answered;
+  - `cost`, when the provider reports it;
+  - `read`, `text` or `features`;
+  - Jev's judgement: `tier`, `specialty`, `confidence`, `difficulty` and `stakes`.
+- `fail_open`, with the error code.
+- `not_called`.
+
+A Jev failure never reaches the chat. The receptionist answers, the reply carries no error text,
+and the row says `fail_open` with the code. The dashboard's Front desk card shows these rows under
+a health line that sums them up and names the Jev build that answered. A row where the
+receptionist answered after a failure is marked as a warning.
 
 ## Modes
 
@@ -192,6 +252,7 @@ next turn.
 
 Some turns are never dispatched:
 
+- a turn in a chat pinned with `/model` (see The pin);
 - a subagent's turn;
 - a turn from a platform in `skip_platforms`, such as cron;
 - a turn that starts with a prefix in `skip_prefixes`;
@@ -205,15 +266,18 @@ session. After a failed claude attempt, the next turn starts a new Claude sessio
 ## Rolling it out
 
 1. Open `jev dashboard`.
-2. In the "Receptionist dispatch" card, set each profile's privacy class and switch on the
-   agents you want. If the card shows the one-classifier conflict, its fix button turns Jev
-   routing off for you.
-3. Use each agent's Test button. It always tests the saved settings, not a pending edit: one
+2. Keys: press Check. It sends one real decisions request to Jev, the way a turn does, and
+   says in words what failed.
+3. Main model: set the receptionist. This machine's Ollama models are listed with their size,
+   and picking one writes its provider and `base_url`. Restart a running gateway once.
+4. In the Front desk card, set each profile's privacy class and switch on the agents you want.
+   The warnings under the switch say what would still keep every turn on the receptionist.
+5. Use each agent's Test button. It always tests the saved settings, not a pending edit: one
    fixed prompt through that agent's own login, reporting whether it answered, the model, and
    the first 80 characters of the reply.
-4. Set Shadow, then watch the "Recent dispatch decisions" table for a day: who would have
-   answered, and why turns stayed here instead.
-5. Set On.
+6. Set Shadow, then watch the "Recent front desk decisions" table for a day: whether Jev was
+   called, who would have answered, and why turns stayed here instead.
+7. Set On.
 
 Rollback is Off, from the same switch.
 
@@ -222,13 +286,12 @@ The chat commands stay as the alternative.
 1. `jev dispatch check`. It shows `policy_mode`, the mode written in dispatch.json.
    `/dispatch` without arguments shows the mode in force, since a switch or config.yaml can
    override the file.
-2. `/jev routing off` (one classifier per turn).
-3. `/dispatch shadow`, then a day of
+2. `/dispatch shadow`, then a day of
    `grep '"kind":"dispatch"' ~/.hermes/logs/jev-decisions.jsonl`. A named profile keeps its
    log under its own home: `~/.hermes/profiles/<name>/logs/`.
-4. `/dispatch on` with one agent enabled. With only claude enabled, only coding turns leave,
+3. `/dispatch on` with one agent enabled. With only claude enabled, only coding turns leave,
    because claude takes repository work only unless `only_repo` is false.
-5. The others, one at a time.
+4. The others, one at a time.
 
 Rollback is `/dispatch off`.
 

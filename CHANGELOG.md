@@ -2,6 +2,40 @@
 
 ## Unreleased
 
+**The front desk works end to end**
+
+- **The root cause.** On 2026-09-29 a hard coding turn on a `qwen3.5:4b` receptionist (Ollama, CPU) was answered by the 4B alone, after 1066 s and with no tools. No Jev request reached OpenRouter, and its row said `routed: false`, "you pinned this model", `latency_ms: null`. Two faults, both reproduced in tests first:
+  - `hermes-jev` read the colon of an Ollama tag as a provider prefix, so the receptionist's own model looked pinned and routing kept it without asking Jev;
+  - `hermes-dispatch` stood aside because routing was on.
+- **One classifier per turn, and it is the front desk's.** In a profile whose front desk is Shadow or On, routing stands aside: it asks Jev nothing and swaps nothing, and `/jev` says so. Dispatch never stands aside. Both plugins read the front desk's mode with one rule, `jevkit/frontdesk.desk_mode`: a `/dispatch` switch, then config.yaml, then `dispatch.json`, then off. They can never both decide, or both stand aside.
+- **The pin rule.** A chat is pinned only when its model differs from the receptionist and from every model in its fallback chain (`fallback_providers`, or the older `fallback_model`). Only a known provider prefix comes off, so an Ollama tag is part of the model's name. A `/model` in one chat skips Jev for that chat only, and its row says `pinned`. Both plugins use `jevkit/frontdesk.is_pinned`.
+- **A row per turn.** Each ordinary turn in a Shadow or On profile logs one `dispatch` row, decisions only, never text:
+  - `jev.call`: `called`, with latency, route (`typesafe` or `openrouter`), the model asked for, the build that answered, the cost when the provider reports it, what Jev read, and its tier, kind and confidence; or `fail_open` with the code; or `not_called`;
+  - the chat model and its API, which the front desk never changes;
+  - whether an agent's answer was handed over;
+  - why a turn was skipped (a subagent's, a cron turn, a template turn).
+- **Jev failures stay out of the chat.** The routing rule tells the chat model never to mention a Jev outage or Jev's error codes. The front desk fails open to the receptionist with no error text in the reply, and the row says `fail_open` with the code.
+- **The dashboard's Front desk card** replaces the two switches that turned each other off:
+  - the receptionist of each profile, with a Change button;
+  - one Off / Shadow / On control;
+  - warnings when a Shadow or On profile would still answer every turn itself: no receptionist, privacy "Only this machine", features only, no agent on, no Jev key, or a receptionist on the ChatGPT login (`codex_responses`), which cannot hand a turn over yet;
+  - a live row per turn with the columns Jev, Tier · kind and Answered by;
+  - a health line that sums up the window and names the Jev build that answered.
+
+  A turn the receptionist answered after a Jev failure, in a profile that keeps every turn here, or that Jev judged hard with nowhere to go, is a warning row. The conflict note and its fix button are gone: routing stands aside by itself. The Jev routing card names the profiles where the front desk decides.
+- **A Keys card.** It shows where the TypeSafe and OpenRouter keys are, and which one turns reach Jev through.
+  - **Save.** A pasted key is checked with the provider and stored the way `jev setup-key` stores it. It never comes back to the page, not even in part, and the field empties before the request goes. Saving works only on a dashboard bound to loopback, the ssh tunnel included.
+  - **Check.** One real decisions request with no retry. It shows the model asked for, the latency and the build that answered, or says what failed in words.
+- **A local receptionist.** `/api/models` lists this machine's Ollama models, from loopback or a private address only: cached for 30 s, never following a redirect, never through a proxy. Picking one under Main model writes the model with its provider and `base_url`. It reuses a named provider that already points at that server. Moving a profile off a local server clears the local `base_url`, because Hermes honours `model.base_url` for other providers too.
+- **The Jev client, as the Jev docs describe it:**
+  - A score answer without `confidence` counts as unsure, not as fully sure. The schema requires it, and read as 1.0 a malformed reply bought the cheapest tier.
+  - `ask` returns the `build` that answered and the `cost` the provider reports.
+  - 403 is `forbidden` and 413 is `state_too_large`, no longer a bad key or an unknown error. The OpenRouter agent still reads 403 as a login problem.
+  - 408 and OpenRouter's 524 are retried within the budget.
+  - Two comments said Jev charges per request. It bills input tokens, about $0.00002 a call, so combining questions saves a round trip, not money.
+- **Guides.** `AGENTS.md`, the installer's `next` list, `README.md`, `router-dashboard/README.md`, `docs/receptionist-dispatch.md` and the Dutch `docs/receptie.md` and `docs/handleiding.md` name one Front desk. The order is Keys → Check, the receptionist under Main model, then the Front desk card. `docs/receptionist-dispatch.md` gains "The pin" and "What each row says". `scripts/demo_home.py` builds a `desk` profile with three front desk rows, so the card can be seen without a NAS.
+- **The research behind three of these changes** is in `docs/superpowers/research/2026-09-29-jev-routers-compared.md`: the health line, the error texts, and the client fixes. It compares about 30 Jev routers and the Jev docs with this design. The rest is proposed for the next plan in `docs/superpowers/plans/2026-09-29-front-desk.md`.
+
 **An install leaves no loose ends**
 
 - **Old `jev` links are replaced.** The installer replaces a `jev` link that points at `bin/jev` of another copy of this repo (an older clone or a cached download), and a link that dangles. It names each one under `cli.replaced`, or `cli.would_replace` with `--check`. Before this, an install over an older one reported success while every agent shell still ran the old code, and the person had to delete two links by hand. A file called `jev`, or a link to anything else, is still never touched. Its warning now says it is not cosmetic.
@@ -10,7 +44,7 @@
   2. `jev setup-key` if the key is missing;
   3. one gateway restart, only when the person says so;
   4. `jev dispatch check`;
-  5. the dashboard's Receptionist dispatch card.
+  5. the dashboard: Keys, Main model, then the Front desk card.
 
   `jev models suggest --write` and `/jev routing shadow` appear only as the alternative to the receptionist. Until now the list led an agent to turn on Jev routing beside the receptionist, which gives one turn two classifiers. `AGENTS.md` follows the same order.
 - **`jev setup-key` on a machine without a browser.** It adds `from_another_computer`, an `ssh -N -L` line with this machine's address and the page's port, plus `without_a_browser` (`jev setup-key --tty`) and `expires_in_s`. Its `say` field covers both ways in and names the right provider. `jev dashboard` prints the same tunnel line for its own port.
@@ -42,7 +76,7 @@
   - OpenRouter takes public turns only, by kind, whatever it is named.
 - The TRIAGE record follows the reasoning library's routing contract, so a local receptionist can later take Jev's place as the classifier (one classifier per turn).
 - `tests/test_turn.py` and `tests/test_question_shape.py` no longer depend on a real key being installed.
-- The dashboard's "Receptionist dispatch" card now covers everything the plugin reads: mode, notice, a privacy class per profile, each agent's on/off, model and (for claude) `only_repo`, the frontier order, clearing a cooldown, a test call per agent, and the one-classifier conflict with Jev routing, with a fix button. Mode and notice write straight to `dispatch-state.json`, the file `/dispatch` writes; privacy, agents and order are staged, previewed, then saved together to `dispatch.json`, with a backup and a verified read-back. The chat commands still work; the dashboard writes the same files they do.
+- The dashboard's "Receptionist dispatch" card now covers everything the plugin reads: mode, notice, a privacy class per profile, each agent's on/off, model and (for claude) `only_repo`, the frontier order, clearing a cooldown, and a test call per agent. Mode and notice write straight to `dispatch-state.json`, the file `/dispatch` writes; privacy, agents and order are staged, previewed, then saved together to `dispatch.json`, with a backup and a verified read-back. The chat commands still work; the dashboard writes the same files they do.
 
 **Every profile of a multiplexed gateway is itself**
 

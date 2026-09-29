@@ -571,8 +571,8 @@ class ReportWarningTests(unittest.TestCase):
             self.assertTrue(steps[0].startswith("jev doctor"))
             self.assertTrue(any(step.startswith("jev dispatch check") for step in steps))
             dashboard = next(step for step in steps if step.startswith("jev dashboard"))
-            self.assertIn("Receptionist dispatch", dashboard)
-            self.assertIn("Shadow", dashboard)
+            for card in ("Front desk", "Keys", "Main model", "Shadow"):
+                self.assertIn(card, dashboard)
             for step in steps:
                 if "/jev routing" in step or "models suggest" in step:
                     self.assertIn("alternative", step, step)

@@ -2405,7 +2405,11 @@ async function keyCheck(name){
 
 - [ ] **Step 9: Run** the three global commands.
 
-- [ ] **Step 10: Commit.** Stage the eight files. Message: `docs: one Front desk: the receptionist, keys and a row per turn; routing stands aside by itself`.
+- [ ] **Step 10: Commit.** Stage the eight files, plus `tests/test_install.py` and `docs/handleiding.md`: the Dutch handbook also named the old card and its red conflict note. Message: `docs: one Front desk: the receptionist, keys and a row per turn; routing stands aside by itself`.
+
+**As built (2026-09-29):**
+- The two older Unreleased entries that named the "Receptionist dispatch" card and its conflict fix are corrected in place, since neither was released.
+- The guides mention OpenRouter's `typesafe/jev-router` as an OpenRouter agent model.
 
 ---
 

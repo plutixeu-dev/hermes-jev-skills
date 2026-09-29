@@ -491,9 +491,10 @@ def home_warning(hermes: Path) -> str | None:
 def next_steps(hermes: bool) -> List[str]:
     """What is left after the install, in order, for the agent to walk the person through.
 
-    On Hermes this said "restart the gateway, then /jev routing shadow". This repo's
-    receptionist (hermes-dispatch) is set up in the dashboard instead, and it must not run
-    beside Jev routing in the same profile: one classifier per turn. An agent that followed
+    On Hermes this said "restart the gateway, then /jev routing shadow". This repo's front
+    desk (hermes-dispatch) is set up in the dashboard instead: the Keys card's Check, the
+    receptionist under Main model, then the Front desk card. One classifier per turn: where
+    the front desk is Shadow or On, Jev routing stands aside by itself. An agent that followed
     the old list turned on the one the person had not chosen.
     """
     steps = ["jev doctor   (key.present and jev.reachable must both be true)",
@@ -507,10 +508,12 @@ def next_steps(hermes: bool) -> List[str]:
     if "hermes-dispatch" in PLUGINS:
         steps += ["jev dispatch check   (which of claude, codex and OpenRouter this machine can reach)",
                   "jev dashboard   (http://127.0.0.1:8791; from another computer it prints an ssh tunnel line). "
-                  "Receptionist dispatch card: privacy per profile, agents, order, Preview, Confirm & save, "
-                  "Test, then Shadow; On after a day of decisions",
-                  "Jev routing is the alternative to the receptionist, not an addition: only if the person "
-                  "chooses it, jev models suggest --write and then /jev routing shadow"]
+                  "Keys card: Check. Main model: the receptionist (a local Ollama model is fine). "
+                  "Front desk card: privacy per profile, agents, order, Preview, Confirm & save, Test, "
+                  "then Shadow; On after a day of decisions",
+                  "Jev routing is the alternative for a profile without a front desk: only if the person "
+                  "chooses it, jev models suggest --write and then /jev routing shadow. In a Front desk "
+                  "profile it stands aside by itself"]
     else:
         steps += ["jev models suggest --write   (only if no routing pools exist yet)",
                   "Hermes: in a new session, /jev routing shadow"]
