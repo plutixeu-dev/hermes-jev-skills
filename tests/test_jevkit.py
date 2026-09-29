@@ -744,6 +744,17 @@ class OpenRouterProviderTests(unittest.TestCase):
             client.ask({"x": 1}, {"ok": client.noul("fine?")}, provider="nonsense", transport=transport)
         self.assertEqual(seen["body"]["model"], client.DEFAULT_MODEL)
 
+    def test_a_reply_says_which_way_jev_was_reached_and_with_which_model(self):
+        """The front desk's log and the dashboard's key check name the route and the model."""
+        def transport(body, headers, timeout):
+            return json.dumps({"answers": {"ok": {"type": "noul", "noul": 0.9}}, "usage": {}}).encode()
+        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-" + "b" * 40}):
+            reply = client.ask({"x": 1}, {"ok": client.noul("fine?")}, transport=transport)
+        self.assertEqual((reply["via"], reply["model"]), ("openrouter", client.OPENROUTER_MODEL))
+        with mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "ts-" + "c" * 30}):
+            reply = client.ask({"x": 1}, {"ok": client.noul("fine?")}, transport=transport)
+        self.assertEqual((reply["via"], reply["model"]), ("typesafe", client.DEFAULT_MODEL))
+
 
 if __name__ == "__main__":
     unittest.main()

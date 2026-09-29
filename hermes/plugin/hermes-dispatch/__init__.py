@@ -120,12 +120,18 @@ def _log(entry: Dict[str, Any]) -> None:
         pass
 
 
+_JEV_KEPT = ("call", "error", "latency_ms", "via", "model", "read", "tier", "specialty", "confidence",
+             "difficulty", "stakes")
+
+
 def _summary(decision: Dict[str, Any]) -> Dict[str, Any]:
-    """What the log keeps of a decision: who, why and how it went. No text, no stderr."""
+    """What the log keeps of a decision: who, why, what Jev did and how it went. No text, no stderr."""
     out = {key: decision.get(key) for key in ("agent", "model", "reason", "downgraded", "privacy", "privacy_why",
                                               "would_send_chars") if key in decision}
     triage = decision.get("triage") or {}
     out["triage"] = {key: triage.get(key) for key in ("type", "exit", "signals", "niveau", "repo_werk", "source", "why")}
+    jev = decision.get("jev") if isinstance(decision.get("jev"), dict) else {}
+    out["jev"] = {key: jev[key] for key in _JEV_KEPT if key in jev} or {"call": "not_called"}
     out["attempts"] = [{"agent": a.get("agent"), "error": a.get("error")} for a in decision.get("attempts") or []]
     return out
 

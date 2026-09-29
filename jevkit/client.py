@@ -451,8 +451,9 @@ def ask(
     if len(encoded_state) > MAX_STATE_CHARS:
         raise JevError("state_too_large")
     default_model = OPENROUTER_MODEL if via == "openrouter" else DEFAULT_MODEL
+    sent_model = model or os.environ.get("TYPESAFE_MODEL") or default_model
     body = json.dumps(
-        {"state": state, "model": model or os.environ.get("TYPESAFE_MODEL") or default_model,
+        {"state": state, "model": sent_model,
          "questions": {name: dict(q) for name, q in questions.items()}},
         separators=(",", ":"), default=str,
     ).encode("utf-8")
@@ -489,7 +490,8 @@ def ask(
         raise JevError("malformed", "reply has no answers")
     checked = {name: _check_answer(name, question, answers.get(name)) for name, question in questions.items()}
     usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
-    return {"answers": checked, "usage": usage, "latency_ms": int((time.monotonic() - started) * 1000)}
+    return {"answers": checked, "usage": usage, "latency_ms": int((time.monotonic() - started) * 1000),
+            "via": via, "model": sent_model}
 
 
 def verify_key(api_key: str, timeout: float = 10.0, provider: str = "typesafe") -> bool:

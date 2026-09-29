@@ -450,6 +450,24 @@ class ClassifyTests(unittest.TestCase):
     def test_no_token_count_is_zero(self):
         self.assertEqual(self.classify(klass="highly_sensitive", context_tokens=None)["context_tokens"], 0)
 
+    def test_a_call_to_jev_is_kept_with_its_latency_route_and_what_it_read(self):
+        record = self.classify(transport=Wire())
+        jev = record["jev"]
+        self.assertEqual((jev["call"], jev["via"], jev["read"], jev["tier"], jev["specialty"]),
+                         ("called", "typesafe", "text", "hard", "coding"))
+        self.assertIsInstance(jev["latency_ms"], int)
+
+    def test_a_failed_call_is_kept_as_fail_open_with_its_code(self):
+        def down(*_):
+            raise dispatch.client.JevError("rate_limited")
+        self.assertEqual(self.classify(transport=down)["jev"], {"call": "fail_open", "error": "rate_limited", "read": "text"})
+
+    def test_a_highly_sensitive_turn_says_jev_was_not_called(self):
+        self.assertEqual(self.classify(klass="highly_sensitive")["jev"], {"call": "not_called"})
+
+    def test_a_private_turn_says_jev_read_features(self):
+        self.assertEqual(self.classify(klass="private", transport=Wire())["jev"]["read"], "features")
+
 
 class JudgeAnswersTests(unittest.TestCase):
     def test_features_only_never_buys_the_cheapest_tier(self):

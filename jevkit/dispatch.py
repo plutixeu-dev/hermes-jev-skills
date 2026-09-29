@@ -422,7 +422,7 @@ def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], 
                               "repo_werk": False, "interactief": bool(interactive)}
     if privacy_class not in PRIVACY or privacy_class == "highly_sensitive":
         return {**record, "privacy": "highly_sensitive", "source": "policy",
-                "why": "highly sensitive: Jev is not asked"}
+                "why": "highly sensitive: Jev is not asked", "jev": {"call": "not_called"}}
     config = config or route.load_config()
     inner = route.unwrap(text, config)
     limit = int(config.get("ask_chars", 2500))
@@ -433,20 +433,32 @@ def classify_with_jev(text: str, *, privacy_class: str, policy: Dict[str, Any], 
                      or privacy.is_sensitive(inner)
                      or config.get("mode") == "features"
                      or (profile or "default") in (config.get("private_profiles") or []))
+    read = "features" if features_only else "text"
+    # What the call did travels with the record (`jev`), so the log can say per turn whether Jev
+    # was asked, how long it took and which way it was reached. A silent local answer must not
+    # read as a judged one.
     if answers is None:
         state = route.state_for(route.clip_ask(inner, limit), context_tokens=record["context_tokens"],
                                 private=features_only, limit=limit)
         try:
-            answers = client.ask(state, route.questions(), timeout=timeout, transport=transport)["answers"]
+            reply = client.ask(state, route.questions(), timeout=timeout, transport=transport)
         except client.JevError as error:
-            return {**record, "source": "fail_open", "why": f"Jev unavailable ({error.code})"}
+            return {**record, "source": "fail_open", "why": f"Jev unavailable ({error.code})",
+                    "jev": {"call": "fail_open", "error": error.code, "read": read}}
+        answers = reply["answers"]
+        call = {"call": "called", "latency_ms": reply.get("latency_ms"), "via": reply.get("via"),
+                "model": reply.get("model"), "read": read}
+    else:
+        call = {"call": "given", "read": read}          # bought elsewhere: `jev dispatch --answers`, tests
+    incomplete = {**record, "source": "fail_open", "why": "routing answers incomplete",
+                  "jev": {**call, "call": "fail_open", "error": "incomplete"}}
     if not all(isinstance(answers.get(name), dict) for name in ("difficulty", "kind", "costly_mistake")):
-        return {**record, "source": "fail_open", "why": "routing answers incomplete"}
+        return incomplete
     try:
         judged = route.judge_answers(answers, config, risky=route.is_risky(inner), features_only=features_only)
     except (KeyError, TypeError, ValueError):
-        return {**record, "source": "fail_open", "why": "routing answers incomplete"}
-    jev = {key: judged[key] for key in ("tier", "specialty", "confidence", "difficulty", "stakes")}
+        return incomplete
+    jev = {**call, **{key: judged[key] for key in ("tier", "specialty", "confidence", "difficulty", "stakes")}}
     if judged["tier"] is None:
         return {**record, "niveau": "tiny", "source": "jev", "why": judged["reason"], "jev": jev}
     niveau = (policy.get("tier_to_niveau") or {}).get(judged["tier"], "standard")

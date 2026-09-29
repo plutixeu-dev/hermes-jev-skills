@@ -118,6 +118,18 @@ class MiddlewareTests(unittest.TestCase):
         self.assertTrue(all(row["jev"] == {"call": "not_called"} for row in self.logs[-3:]))
         self.assertEqual(self.dispatched, [])
 
+    def test_the_row_says_what_jev_did_and_who_answered(self):
+        self.mode("on")
+        self.answer = {**self.answer, "jev": {"call": "called", "latency_ms": 412, "via": "openrouter",
+                                              "model": "~typesafe/jev-latest", "read": "text", "tier": "hard",
+                                              "specialty": "coding", "confidence": 0.9}}
+        self.call()
+        row = self.logs[-1]
+        self.assertEqual((row["jev"]["call"], row["jev"]["tier"], row["jev"]["latency_ms"], row["handed_over"]),
+                         ("called", "hard", 412, True))
+        self.assertEqual((row["chat_model"], row["api_mode"]), ("qwen36", "chat_completions"))
+        self.assertNotIn("text", row)
+
     def test_the_chat_model_is_never_changed(self):
         self.mode("on")
         self.answer = {"agent": "local", "reason": "standard work stays on this machine", "downgraded": False,
