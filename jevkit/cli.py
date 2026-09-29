@@ -171,6 +171,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             report["routing"]["warnings"] = [f"the routing checks could not run ({type(error).__name__}); "
                                              f"the pools were NOT checked. Look at {route.config_path()}."]
     report["hermes_home"] = str(catalog.hermes_home()) if catalog.hermes_home().is_dir() else None
+    # What to do about it, so an agent reading this does not have to guess the next command.
+    if not report["key"]["present"]:
+        report["next"] = ("jev setup-key: the person pastes the key on a private page, never in the chat. "
+                          "It says what to do when this machine has no browser.")
+    elif (report.get("jev") or {}).get("reachable") is False:
+        report["next"] = (f"Jev did not answer ({report['jev'].get('error')}). Check this machine's network; "
+                          f"if the key was revoked, run jev setup-key again with a new one.")
     _out(report)
     # Only a missing key fails doctor. The routing findings are warnings about cost: an
     # install script that gates on this exit code must not fail because a pool is pricey.
@@ -616,6 +623,11 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
         token = os.environ.get("DASHBOARD_TOKEN") or secrets.token_urlsafe(24)
         os.environ["DASHBOARD_TOKEN"] = token
         print(f"open once with the token: http://{args.host}:{args.port}/?token={token}", file=sys.stderr)
+    else:
+        # The page answers on this machine's loopback only. On a NAS or server with no
+        # browser that is nowhere the person can look, so say how to reach it from theirs.
+        print(f"from another computer: run `{key_setup.tunnel_command(args.port)}` there, leave it open, "
+              f"then open http://127.0.0.1:{args.port}/", file=sys.stderr)
     return subprocess.call(command)
 
 

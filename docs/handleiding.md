@@ -7,6 +7,8 @@ Deze fork (`plutixeu-dev/hermes-jev-skills`) is de originele hermes-jev-skills (
 - hoe je de modellen en logins koppelt;
 - wat je moet doen voordat de receptie werkt. Het is niet plug-and-play; reken op ongeveer een halfuur, plus een dag kijken in de proefstand.
 
+Wil je alleen weten waar de receptie zit en hoe je hem bedient? Lees dan [receptie.md](receptie.md).
+
 ## 1. Wat deze fork toevoegt aan het origineel
 
 | Onderdeel | Origineel | Deze fork |
@@ -60,6 +62,19 @@ python3 ~/hermes-jev-skills/install.py
 
 Dit installeert drie Hermes-plugins: `hermes-jev`, `hermes-handoff` en `hermes-dispatch` (de receptie). De receptie staat na installatie **uit**. Herstart de Hermes-gateway één keer, zodat Hermes de plugins laadt. Na die ene keer werkt elke wijziging in het dashboard meteen, zonder herstart.
 
+Wat de installer zelf regelt:
+
+- **Oude `jev`-links.** Een link naar een oudere kopie van deze repo, zoals een oude clone of een cache, wordt vervangen. Wijst een link naar iets dat niet meer bestaat, dan ook. Je ziet ze in het rapport onder `cli.replaced`, en je hoeft niets met de hand te verwijderen.
+- **Een eigen bestand of een link naar iets anders heet `jev`.** Dat blijft staan, en het rapport waarschuwt. Die waarschuwing is niet cosmetisch: een terminal die dat bestand vindt, draait die `jev` en niet deze.
+- **De lijst `next` in het rapport** is de volgorde van de rest:
+  1. `jev doctor`;
+  2. zo nodig `jev setup-key`;
+  3. de gateway één keer herstarten;
+  4. `jev dispatch check`;
+  5. het dashboard.
+
+  `/jev routing` staat daar alleen als alternatief voor de receptie, niet als extra.
+
 ## 4. De koppelingen: wat je één keer instelt
 
 | Wat | Waarvoor | Hoe (in je eigen terminal, op de Hermes-machine) |
@@ -72,9 +87,18 @@ Dit installeert drie Hermes-plugins: `hermes-jev`, `hermes-handoff` en `hermes-d
 
 Sleutels plak je altijd zelf op die pagina, nooit in een chat. Het dashboard toont alleen óf er een sleutel is.
 
+**Draait Hermes op een NAS of server zonder scherm?** De pagina van `jev setup-key` werkt alleen op die machine zelf, via 127.0.0.1. Als daar geen browser opengaat, geeft `jev setup-key` zelf twee manieren:
+
+- **Via een SSH-tunnel.** Er staat een regel `ssh -N -L <poort>:127.0.0.1:<poort> <gebruiker>@<machine>` bij. Voer die uit op je eigen computer en laat het venster open. Daarna opent de link daar gewoon in je browser.
+- **Zonder browser.** Log zelf in op de machine en voer `jev setup-key --tty` uit. Je plakt de sleutel dan in een verborgen prompt.
+
+De link werkt tien minuten. Is hij verlopen, draai `jev setup-key` dan opnieuw: je krijgt een nieuwe poort, dus ook een nieuwe tunnelregel.
+
 ## 5. Instellen in het dashboard
 
-1. Start `jev dashboard` en open `http://127.0.0.1:8791` in je browser op dezelfde machine. Voor een ander apparaat in je thuisnetwerk: zie [router-dashboard/README.md](../router-dashboard/README.md), onderdeel "Off your own machine".
+Dit is de korte versie. Elke knop, de bestanden en een tabel met problemen en oplossingen staan in [receptie.md](receptie.md).
+
+1. Start `jev dashboard` en open `http://127.0.0.1:8791` in je browser op dezelfde machine. Werk je vanaf een andere computer, bijvoorbeeld omdat Hermes op een NAS draait? Dan toont `jev dashboard` een regel `ssh -N -L 8791:127.0.0.1:8791 …`. Voer die uit op je eigen computer, laat het venster open, en open daar `http://127.0.0.1:8791`. Voor een privénetwerk zoals Tailscale: zie [router-dashboard/README.md](../router-dashboard/README.md), onderdeel "Off your own machine".
 2. Kijk in het blok **Receptionist dispatch** eerst bij **Checks**:
    - "Plugin installed" moet een vinkje hebben;
    - "Enabled in this profile" ook.

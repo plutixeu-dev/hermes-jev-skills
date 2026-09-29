@@ -12,7 +12,9 @@ from __future__ import annotations
 import getpass
 import html
 import json
+import os
 import secrets
+import socket
 import sys
 import threading
 import time
@@ -60,6 +62,28 @@ This page is served only by your own machine and closes after one use.</p>"""
 
 _DONE = """<h1 class="ok">Jev is connected</h1>
 <p>The key was saved__VERIFIED__. You can close this tab and go back to your agent.</p>"""
+
+
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+def tunnel_command(port: int, environ: Optional[Dict[str, str]] = None) -> str:
+    """The ssh line that opens a page on this machine's loopback in a browser on the person's own computer.
+
+    Hermes often runs on a NAS or server with no browser. The page answered only on that
+    machine's 127.0.0.1, so "open this page on the computer running your agent" was a dead
+    end, and the agent had to invent a way round it. Forwarding the same port keeps the
+    link and its Host check exactly as printed. The host is the address this shell was
+    reached by over ssh, else this machine's name: the person may need their usual one.
+    """
+    env = os.environ if environ is None else environ
+    try:
+        user = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no user name is a placeholder, not a failure
+        user = "<user>"
+    ssh = (env.get("SSH_CONNECTION") or "").split()
+    host = ssh[2] if len(ssh) == 4 else (socket.gethostname() or "<this-machine>")
+    return f"ssh -N -L {port}:127.0.0.1:{port} {user}@{host}"
 
 
 def _render(body: str) -> bytes:
@@ -174,9 +198,21 @@ def run_browser(
         except Exception:  # noqa: BLE001
             opened = False
     # The URL holds no secret; it is safe for an agent to relay to its person.
-    print(json.dumps({"status": "waiting", "url": url, "browser_opened": opened,
-                      "say": "Open this page on the computer running your agent and paste your TypeSafe key there."}),
-          file=sys.stderr, flush=True)
+    announce: Dict[str, Any] = {"status": "waiting", "url": url, "browser_opened": opened,
+                                "expires_in_s": round(timeout),
+                                "say": f"Open this page on the computer running your agent and paste your "
+                                       f"{label} key there, never in the chat."}
+    if not opened and host in LOOPBACK:
+        tunnel = tunnel_command(server.server_address[1])
+        lasts = f"{round(timeout / 60)} minutes" if timeout >= 120 else f"{round(timeout)} seconds"
+        announce.update({
+            "from_another_computer": tunnel, "without_a_browser": "jev setup-key --tty",
+            "say": (f"No browser opened on this machine. On your own computer, run `{tunnel}` in a "
+                    f"terminal, leave it open, then open {url} there and paste your {label} key. "
+                    f"Or log in to this machine yourself and run `jev setup-key --tty`. Never paste "
+                    f"the key into the chat. The link stops working after {lasts}; "
+                    f"run `jev setup-key` again for a new one.")})
+    print(json.dumps(announce), file=sys.stderr, flush=True)
     finished = done.wait(timeout)
     time.sleep(0.3)  # let the success page flush before the listener goes away
     server.shutdown()

@@ -250,6 +250,61 @@ class CommandLinkTests(unittest.TestCase):
             self.assertEqual(stale.resolve(), install.JEV)
             self.assertNotIn("not_linked", report["cli"])
 
+    def _old_checkout(self, tmp, name="old-cache"):
+        """A copy of this repo somewhere else, as an earlier clone or a cached download leaves it."""
+        old = Path(tmp) / name
+        (old / "bin").mkdir(parents=True)
+        (old / "jevkit").mkdir()
+        (old / "install.py").write_text("# an older installer\n")
+        (old / "jevkit" / "__init__.py").write_text("")
+        (old / "bin" / "jev").write_text("#!/bin/sh\necho old jev\n")
+        return old / "bin" / "jev"
+
+    def test_links_to_an_old_copy_of_this_repo_are_replaced_and_named(self):
+        """An install over an earlier one left ~/.local/bin/jev and <HERMES_HOME>/bin/jev on
+        the old copy. The report said success, the agents ran the old code, and the person
+        had to find and delete both links by hand before `jev dispatch check` existed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fleet(tmp)
+            old = self._old_checkout(tmp)
+            gone = Path(tmp) / "deleted-clone" / "bin" / "jev"            # a clone that was removed since
+            links = {Path(tmp) / ".local" / "bin" / "jev": old, root / "bin" / "jev": old,
+                     root / "profiles" / "alpha" / "bin" / "jev": gone}
+            for link, target in links.items():
+                link.parent.mkdir(parents=True)
+                link.symlink_to(target)
+
+            code, report = run_installer(["--check"], tmp)
+            self.assertEqual(code, 0)
+            self.assertEqual(report["cli"]["would_replace"], {str(k): str(v) for k, v in links.items()})
+            for link, target in links.items():
+                self.assertEqual(os.readlink(link), str(target), "--check changed a link")
+
+            code, report = run_installer([], tmp)
+            self.assertEqual(code, 0)
+            self.assertEqual(report["cli"]["replaced"], {str(k): str(v) for k, v in links.items()})
+            self.assertNotIn("not_linked", report["cli"])
+            self.assertNotIn("was not linked", report.get("warning", ""))
+            for link in links:
+                self.assertEqual(link.resolve(), install.JEV)
+            self.assertEqual(old.read_text(), "#!/bin/sh\necho old jev\n", "the old copy itself is never touched")
+
+            code, report = run_installer([], tmp)                         # a second run has nothing to replace
+            self.assertNotIn("replaced", report["cli"])
+
+    def test_a_link_to_a_folder_that_merely_has_a_bin_jev_is_still_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._fleet(tmp)
+            tool = self._foreign_file(Path(tmp) / "some-tool" / "bin" / "jev")
+            (tool.parent.parent / "install.py").write_text("# not this repo: no jevkit\n")
+            link = root / "bin" / "jev"
+            link.parent.mkdir()
+            link.symlink_to(tool)
+            code, report = run_installer([], tmp)
+            self.assertEqual(os.readlink(link), str(tool))
+            self.assertIn(str(link), report["cli"]["not_linked"])
+            self.assertIn("not cosmetic", report["warning"])
+
     def test_uninstall_removes_only_the_links_it_made(self):
         """--uninstall deleted ANY bin/jev without checking whose it was."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -503,6 +558,26 @@ class ReportWarningTests(unittest.TestCase):
             self.assertIn("hermes", report)
             self.assertTrue([step for step in report["next"] if "Hermes" in step])
             self.assertNotIn("--skills-dir", report.get("warning", ""))
+
+    def test_hermes_next_steps_lead_to_the_dashboard_not_to_jev_routing(self):
+        """The list said "restart the gateway, then /jev routing shadow", so an agent turned on
+        Jev routing beside the receptionist: two classifiers on one turn."""
+        with tempfile.TemporaryDirectory() as tmp:
+            hermes = Path(tmp) / ".hermes"
+            hermes.mkdir()
+            (hermes / "config.yaml").write_text(CONFIG)
+            code, report = run_installer(["--check"], tmp)
+            steps = report["next"]
+            self.assertTrue(steps[0].startswith("jev doctor"))
+            self.assertTrue(any(step.startswith("jev dispatch check") for step in steps))
+            dashboard = next(step for step in steps if step.startswith("jev dashboard"))
+            self.assertIn("Receptionist dispatch", dashboard)
+            self.assertIn("Shadow", dashboard)
+            for step in steps:
+                if "/jev routing" in step or "models suggest" in step:
+                    self.assertIn("alternative", step, step)
+            restart = next(step for step in steps if "gateway" in step)
+            self.assertIn("only when the person says so", restart)
 
 
 if __name__ == "__main__":

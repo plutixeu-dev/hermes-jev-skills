@@ -304,7 +304,8 @@ class DoctorTests(unittest.TestCase):
                 mock.patch.object(cli.catalog, "models", catalog_models), \
                 contextlib.redirect_stdout(out):
             code = cli.main(["doctor", "--offline"])
-        return code, json.loads(out.getvalue())["routing"], catalog_models
+        self.report = json.loads(out.getvalue())
+        return code, self.report["routing"], catalog_models
 
     def test_both_findings_are_said_in_plain_words_and_doctor_still_passes(self):
         cfg = config(LIVE_SHAPE, escalation={"enabled": True, "rungs": LADDER})
@@ -336,6 +337,10 @@ class DoctorTests(unittest.TestCase):
         code, routing, _ = self.doctor(config(healthy), key=False)
         self.assertEqual(code, 1)
         self.assertNotIn("warnings", routing)
+        self.assertIn("jev setup-key", self.report["next"])            # and it says what to do about it
+        self.assertIn("never in the chat", self.report["next"])
+        self.doctor(config(healthy))
+        self.assertNotIn("next", self.report)
 
     def test_offline_with_no_cached_catalog_never_fetches_and_never_says_ok(self):
         same_lead = {"simple": {"general": ["or:flash-b"]}, "medium": {"general": ["or:flash-b"]}}

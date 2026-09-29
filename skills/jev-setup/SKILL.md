@@ -41,7 +41,7 @@ If both keys exist, TypeSafe is used: an existing install never starts routing i
 
 ## When there is no browser
 
-Headless server over SSH: the person runs `jev setup-key --tty` **themselves** in their own terminal. It is a hidden prompt. Do not run it for them through a tool that captures the terminal.
+Headless server (a NAS, a VM): when `browser_opened` is false, the JSON line has two more fields. Relay its `say` field. `from_another_computer` is an `ssh -N -L` line for the person to run on their own computer, after which the `url` opens there. `without_a_browser` is the alternative: the person runs `jev setup-key --tty` **themselves** in their own terminal. It is a hidden prompt. Do not run it for them through a tool that captures the terminal.
 
 Remote machine on a private network (Tailscale, VPN): `jev setup-key --host <private-ip> --no-open` and send them the link. That traffic is plain HTTP, so use it only on a network you trust end to end. Never bind a public address.
 

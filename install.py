@@ -9,8 +9,10 @@ On Hermes it installs every plugin under hermes/plugin, the skills, and the scri
 hermes/scripts; --uninstall removes those and nothing else.
 
 The `jev` command is a link: one in ~/.local/bin for the person, one in the bin folder of
-every Hermes home for the agents. A file called `jev` that this installer did not make is
-never replaced and never removed; it is reported instead.
+every Hermes home for the agents. A link that dangles or points at bin/jev of another copy
+of this repo (an older clone, a cached download) is replaced and named under cli.replaced.
+Any other `jev` this installer did not make is never replaced and never removed; it is
+reported instead.
 
 It never asks for, reads or prints an API key. Connecting the key is a separate,
 private step: `jev setup-key`.
@@ -83,6 +85,27 @@ def _is_ours(link: Path) -> bool:
     return REPO in target.parents
 
 
+def _is_old_copy(link: Path) -> bool:
+    """True for a `jev` link that runs nothing of anyone's: it dangles, or it is bin/jev of another checkout of this repo.
+
+    An earlier install from another clone or a cached download left links there. Leaving
+    them made the new install report success while every agent shell kept running the old
+    code, and the person had to find and delete two links by hand. Only a symlink ever
+    qualifies; a file called `jev` is never replaced.
+    """
+    if not link.is_symlink():
+        return False
+    try:
+        target = link.resolve()
+    except (OSError, RuntimeError):
+        return False
+    if not target.exists():
+        return True                            # dangling: replacing it loses nothing but the link
+    checkout = target.parent.parent
+    return (target.name == "jev" and target.parent.name == "bin" and (checkout / "install.py").is_file()
+            and (checkout / "jevkit" / "__init__.py").is_file())
+
+
 def _can_write(folder: Path) -> bool:
     """Whether a link could be made in ``folder``, judged from the nearest folder that exists."""
     # A dangling symlink called bin does not "exist", yet mkdir cannot go through it: without
@@ -92,19 +115,23 @@ def _can_write(folder: Path) -> bool:
     return folder.is_dir() and os.access(folder, os.W_OK | os.X_OK)
 
 
-def _link_command(link: Path, check: bool) -> "str | None":
+def _link_command(link: Path, check: bool, replaced: "Dict[str, str] | None" = None) -> "str | None":
     """Point ``link`` at this checkout's bin/jev. Returns why it was left alone, or None when it is ours.
 
-    Only a missing path or a link into this checkout is ever replaced. ``_link`` unlinks
-    whatever it finds, which is right inside plugins/, where the name is ours, and wrong
-    for a file called ``jev`` on somebody's PATH: a person's own script of that name went
-    with no backup. Every failure comes back as a reason, never as an exception, so one
+    Only a missing path, a link into this checkout, or a link to an old copy (see
+    ``_is_old_copy``) is ever replaced; the old target goes into ``replaced``. ``_link``
+    unlinks whatever it finds, which is right inside plugins/, where the name is ours, and
+    wrong for a file called ``jev`` on somebody's PATH: a person's own script of that name
+    went with no backup. Every failure comes back as a reason, never as an exception, so one
     read-only lane costs that lane its link and not the other forty theirs.
     """
     try:
         if link.is_symlink():
             if not _is_ours(link):
-                return f"is a symlink to {os.readlink(link)}, which is outside this checkout"
+                if not _is_old_copy(link):
+                    return f"is a symlink to {os.readlink(link)}, which is outside this checkout"
+                if replaced is not None:
+                    replaced[str(link)] = os.readlink(link)
             if os.readlink(link) == str(JEV):
                 return None                    # already right, so a second install rewrites nothing
         elif link.exists():
@@ -113,7 +140,7 @@ def _link_command(link: Path, check: bool) -> "str | None":
             return None if _can_write(link.parent) else f"cannot be linked: {link.parent} is not a writable folder"
         link.parent.mkdir(parents=True, exist_ok=True)
         if link.is_symlink():
-            link.unlink()                      # ours: a stale or dangling link into this checkout
+            link.unlink()                      # ours, or an old copy's: stale, dangling or another checkout
         link.symlink_to(JEV)
     except OSError as exc:
         return f"could not be linked: {exc.strerror or exc}"
@@ -325,7 +352,8 @@ def install_skills(folder: Path, check: bool) -> Dict[str, object]:
 def install_cli(check: bool, hermes_home: "Path | None" = None) -> Dict[str, object]:
     target = Path.home() / ".local" / "bin" / "jev"
     not_linked: Dict[str, str] = {}
-    reason = _link_command(target, check)
+    replaced: Dict[str, str] = {}
+    reason = _link_command(target, check, replaced)
     if reason:
         not_linked[str(target)] = reason
     on_path = str(target.parent) in os.environ.get("PATH", "").split(os.pathsep)
@@ -336,13 +364,15 @@ def install_cli(check: bool, hermes_home: "Path | None" = None) -> Dict[str, obj
     if hermes_home is not None and (hermes_home / "config.yaml").is_file():
         for home in command_homes(hermes_home):
             shim = home / "bin" / "jev"
-            reason = _link_command(shim, check)
+            reason = _link_command(shim, check, replaced)
             if reason:
                 not_linked[str(shim)] = reason
             else:
                 shims.append(str(shim))
     return {"command": str(target), "on_path": on_path,
             **({"agent_shell_commands": shims} if shims else {}),
+            # The old target of every link that pointed at an old copy; --check names what it would replace.
+            **({"would_replace" if check else "replaced": replaced} if replaced else {}),
             **({"not_linked": not_linked} if not_linked else {})}
 
 
@@ -409,9 +439,10 @@ def link_warning(cli: Dict[str, object], mode: str) -> str | None:
     if mode == "uninstall":
         return f"Not removed, so a `jev` may still be found there:\n{lines}"
     tense = "would not be linked" if mode == "check" else "was not linked"
-    return (f"`jev` {tense} in {len(skipped)} place(s). Nothing there was replaced or deleted, and "
-            f"the rest of the install carried on. If `jev` should live there, move what is in "
-            f"the way aside and run the installer again:\n{lines}")
+    return (f"`jev` {tense} in {len(skipped)} place(s). This is not cosmetic: a shell that finds "
+            f"one of these runs that `jev`, not this one. Nothing there was replaced or deleted, and "
+            f"the rest of the install carried on. If `jev` should live there, look at what is in "
+            f"the way, move it aside and run the installer again:\n{lines}")
 
 
 def lane_warning(hermes: Dict[str, object]) -> str | None:
@@ -457,6 +488,35 @@ def home_warning(hermes: Path) -> str | None:
     return None
 
 
+def next_steps(hermes: bool) -> List[str]:
+    """What is left after the install, in order, for the agent to walk the person through.
+
+    On Hermes this said "restart the gateway, then /jev routing shadow". This repo's
+    receptionist (hermes-dispatch) is set up in the dashboard instead, and it must not run
+    beside Jev routing in the same profile: one classifier per turn. An agent that followed
+    the old list turned on the one the person had not chosen.
+    """
+    steps = ["jev doctor   (key.present and jev.reachable must both be true)",
+             "jev setup-key   (only if key.present is false; the person pastes the key on a private page, "
+             "never in the chat. Without a browser on this machine it prints an ssh tunnel line to run on "
+             "their own computer, and `jev setup-key --tty` is the other way)"]
+    if not hermes:
+        return steps + ["jev models suggest --write   (only if no routing pools exist yet)"]
+    steps.append("Hermes: plugins load when a session or gateway starts; restart a running gateway "
+                 "once, but only when the person says so")
+    if "hermes-dispatch" in PLUGINS:
+        steps += ["jev dispatch check   (which of claude, codex and OpenRouter this machine can reach)",
+                  "jev dashboard   (http://127.0.0.1:8791; from another computer it prints an ssh tunnel line). "
+                  "Receptionist dispatch card: privacy per profile, agents, order, Preview, Confirm & save, "
+                  "Test, then Shadow; On after a day of decisions",
+                  "Jev routing is the alternative to the receptionist, not an addition: only if the person "
+                  "chooses it, jev models suggest --write and then /jev routing shadow"]
+    else:
+        steps += ["jev models suggest --write   (only if no routing pools exist yet)",
+                  "Hermes: in a new session, /jev routing shadow"]
+    return steps
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true")
@@ -493,13 +553,9 @@ def main() -> int:
             report["hermes"] = install_hermes(hermes, args.enable, args.check)
             warnings += [w for w in (lane_warning(report["hermes"]),) if w]  # type: ignore[arg-type]
         report["skill_folders"] = [install_skills(f, args.check) for f in folders]
-        steps = ["jev doctor", "jev setup-key   (only if the key is missing; the person pastes it in a private page)",
-                 "jev models suggest --write   (only if no routing pools exist yet)"]
-        if "hermes" in report:
-            steps.append("Hermes: restart the gateway when convenient, then /jev routing shadow")
-        elif not folders:
+        report["next"] = next_steps("hermes" in report)
+        if "hermes" not in report and not folders:
             warnings.append(nothing_installed_warning(hermes, args.check))
-        report["next"] = steps
     # Warning first, so it is read before the wall of paths underneath it.
     print(json.dumps({**({"warning": "\n".join(warnings)} if warnings else {}), **report}, indent=2))
     return 0

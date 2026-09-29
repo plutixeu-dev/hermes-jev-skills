@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+**An install leaves no loose ends**
+
+- **Old `jev` links are replaced.** The installer replaces a `jev` link that points at `bin/jev` of another copy of this repo (an older clone or a cached download), and a link that dangles. It names each one under `cli.replaced`, or `cli.would_replace` with `--check`. Before this, an install over an older one reported success while every agent shell still ran the old code, and the person had to delete two links by hand. A file called `jev`, or a link to anything else, is still never touched. Its warning now says it is not cosmetic.
+- **The next steps follow this fork.** On Hermes, the installer's `next` list is:
+  1. `jev doctor`;
+  2. `jev setup-key` if the key is missing;
+  3. one gateway restart, only when the person says so;
+  4. `jev dispatch check`;
+  5. the dashboard's Receptionist dispatch card.
+
+  `jev models suggest --write` and `/jev routing shadow` appear only as the alternative to the receptionist. Until now the list led an agent to turn on Jev routing beside the receptionist, which gives one turn two classifiers. `AGENTS.md` follows the same order.
+- **`jev setup-key` on a machine without a browser.** It adds `from_another_computer`, an `ssh -N -L` line with this machine's address and the page's port, plus `without_a_browser` (`jev setup-key --tty`) and `expires_in_s`. Its `say` field covers both ways in and names the right provider. `jev dashboard` prints the same tunnel line for its own port.
+- **`jev doctor` says what to do next.** It gets a `next` field when the key is missing or Jev does not answer.
+- **`docs/receptie.md`**, a guide in Dutch to the receptionist. It covers:
+  - where each part lives;
+  - how to reach the dashboard from another computer;
+  - every control in the card;
+  - a first setup;
+  - daily use;
+  - a table of problems and their fixes.
+
 **Receptionist dispatch: a hard turn goes to the agent that should answer it**
 
 - New `hermes-dispatch` plugin (off by default) and `jev dispatch`. On the first provider call of a turn, `llm_execution` middleware classifies the turn with Jev, applies a deterministic policy (privacy class, level, context window, cooldowns, order), and either lets the local call go ahead or hands the turn to Codex on a ChatGPT login, Claude Code, or OpenRouter. The answer comes back unchanged under one line naming its author. Shadow mode decides and logs only. A quota, auth or missing-program failure cools that agent for every lane through the ladder, under its own `dispatch:<agent>` name. A timeout cools it for five minutes. Then the next agent or the local model answers. A turn spends at most `turn_budget` (10 minutes) on agents. The privacy class covers every turn a handoff would carry, not only the newest. The handoff's history is the conversation as it was said: recalled memory, other plugins' context and compaction summaries stay behind. Agents run in an empty directory with a minimal environment: API keys stay behind, a Claude login token and proxy settings pass. claude runs with no tools and no MCP servers, in one empty directory of its own so its session resumes. A failure's detail never carries output text, and the log never names a word from `sensitive_terms`.

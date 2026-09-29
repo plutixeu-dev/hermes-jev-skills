@@ -347,6 +347,29 @@ class KeySetupTests(unittest.TestCase):
         self.assertEqual(self.box["result"]["status"], "stored")
         self.assertNotIn(KEY, json.dumps(self.box["result"]) + "".join(self.announced) + done)
 
+    def test_without_a_browser_it_says_how_to_reach_the_page_from_another_computer(self):
+        """On a NAS the page only answered on the NAS's own loopback, and the one instruction
+        was to open it "on the computer running your agent", which has no browser."""
+        thread, url = self.start(timeout=2)
+        thread.join(30)
+        announced = json.loads(next(line for line in self.announced if "url" in line))
+        port = urllib.parse.urlsplit(url).port
+        self.assertFalse(announced["browser_opened"])
+        self.assertTrue(announced["from_another_computer"].startswith(f"ssh -N -L {port}:127.0.0.1:{port} "))
+        self.assertEqual(announced["without_a_browser"], "jev setup-key --tty")
+        self.assertIn(announced["from_another_computer"], announced["say"])
+        self.assertIn("never paste the key into the chat", announced["say"].lower())
+        self.assertEqual(announced["expires_in_s"], 2)
+        self.assertIn("after 2 seconds", announced["say"])
+
+    def test_the_tunnel_names_the_address_this_shell_was_reached_by(self):
+        with mock.patch.object(key_setup.getpass, "getuser", return_value="sam"):
+            over_ssh = key_setup.tunnel_command(41771, {"SSH_CONNECTION": "192.0.2.10 51234 192.0.2.20 22"})
+            with mock.patch.object(key_setup.socket, "gethostname", return_value="pluto"):
+                local = key_setup.tunnel_command(8791, {})
+        self.assertEqual(over_ssh, "ssh -N -L 41771:127.0.0.1:41771 sam@192.0.2.20")
+        self.assertEqual(local, "ssh -N -L 8791:127.0.0.1:8791 sam@pluto")
+
     def test_rebinding_host_header_is_refused(self):
         thread, url = self.start(timeout=3)
         with self.assertRaises(urllib.error.HTTPError):
