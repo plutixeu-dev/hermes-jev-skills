@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -47,6 +48,11 @@ class StoreTestCase(unittest.TestCase):
         for p in (self.root_cfg, self.wiki_cfg):
             with open(p, "w", encoding="utf-8") as fh:
                 fh.write(FIXTURE)
+        # No test connects to an Ollama: the model list asks a fake that knows no models.
+        nothing = {"url": "http://127.0.0.1:11434", "models": [], "reason": "Ollama did not answer (OSError)"}
+        patch = mock.patch.object(rs.ollama, "list_models", lambda base=None, **kw: nothing)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -152,6 +158,29 @@ class StoreTestCase(unittest.TestCase):
         self.assertEqual(rs.read_config(self.root_cfg)["jev"]["mode"], "not-configured")
         rec = rs.apply_changes(self.home, self.root_cfg, {})
         self.assertTrue(rec["ok"])
+
+    def test_local_models_join_the_catalog_marked_local(self):
+        fake = {"url": "http://127.0.0.1:11434", "reason": "",
+                "models": [{"name": "qwen3.5:4b", "parameter_size": "4.7B", "size": 1, "family": "qwen3"}]}
+        with mock.patch.object(rs.ollama, "list_models", lambda base=None, **kw: fake):
+            rows = rs.model_catalog(self.home)
+        self.assertIn({"id": "qwen3.5:4b", "provider": "local", "local": True, "size": "4.7B"}, rows)
+
+    def test_receptionist_reads_model_named_and_legacy_providers(self):
+        path = os.path.join(self.home, "config.yaml")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("model:\n  provider: local-ollama-cpu\n  default: qwen3.5:4b\n"
+                     "providers:\n  local-ollama-cpu:\n    api: http://127.0.0.1:11434/v1\n")
+        desk = rs.receptionist(path)
+        self.assertEqual((desk["model"], desk["endpoint"], desk["local"], desk["api"]),
+                         ("qwen3.5:4b", "http://127.0.0.1:11434/v1", True, "chat_completions"))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("model:\n  provider: openai-codex\n  default: gpt-5.5\n")
+        self.assertEqual((rs.receptionist(path)["local"], rs.receptionist(path)["api"]), (False, "codex_responses"))
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("model:\n  provider: custom:Box\n  default: q\n"
+                     "custom_providers:\n  - name: Box\n    base_url: http://10.0.0.5:11434/v1\n")
+        self.assertEqual(rs.receptionist(path)["endpoint"], "http://10.0.0.5:11434/v1")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -27,7 +28,13 @@ from typing import Any, Optional
 
 import yaml
 
-import pools
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+from jevkit import ollama  # noqa: E402
+
+import pools  # noqa: E402
 
 # ---------------------------------------------------------------- use cases
 
@@ -415,7 +422,68 @@ def model_catalog(hermes_home: str, limit: int = 4000) -> list[dict[str, str]]:
     for provider, mid in _accessible_models(hermes_home):
         add(mid, provider)
 
-    return [{"id": k, "provider": v} for k, v in sorted(seen.items())]
+    rows = [{"id": k, "provider": v} for k, v in sorted(seen.items())]
+    local = [{"id": m["name"], "provider": "local", "local": True, "size": m["parameter_size"]}
+             for m in local_models(hermes_home)["models"]]
+    return rows + local
+
+
+LOCAL_PROVIDER = "custom"     # upstream Hermes: "any other OpenAI-compatible endpoint"; ollama, vllm, llamacpp alias it
+_PROVIDER_API = {"openai-codex": "codex_responses", "anthropic": "anthropic_messages"}
+
+
+def _yaml(path: str) -> dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _named_entry(data: dict[str, Any], provider: str) -> dict[str, Any]:
+    """The `providers:` entry, or legacy `custom_providers:` item, that a provider name points at, or {}."""
+    key = provider[len("custom:"):] if provider.startswith("custom:") else provider
+    key = key.strip().lower().replace(" ", "-")
+    if not key:
+        return {}
+    named = data.get("providers")
+    for name, entry in (named.items() if isinstance(named, dict) else []):
+        if isinstance(entry, dict) and key in (str(name).lower(), str(entry.get("name") or "").lower().replace(" ", "-")):
+            return entry
+    legacy = data.get("custom_providers")
+    for entry in (legacy if isinstance(legacy, list) else []):
+        if isinstance(entry, dict) and str(entry.get("name") or "").lower().replace(" ", "-") == key:
+            return entry
+    return {}
+
+
+def _entry_url(entry: dict[str, Any]) -> str:
+    return str(entry.get("api") or entry.get("base_url") or entry.get("url") or "")
+
+
+def receptionist(config_path: str) -> dict[str, Any]:
+    """The chat model a profile's config.yaml names: provider, model, base_url, the endpoint it is
+    served from, whether that endpoint is local (loopback, private or Tailscale), and the API
+    Hermes speaks to it. A missing or unreadable file gives empty fields."""
+    data = _yaml(config_path)
+    model = data.get("model") if isinstance(data.get("model"), dict) else {}
+    provider = str(model.get("provider") or "")
+    entry = _named_entry(data, provider)
+    base_url = str(model.get("base_url") or "")
+    endpoint = base_url or _entry_url(entry)
+    api = str(entry.get("transport") or entry.get("api_mode") or _PROVIDER_API.get(provider, "chat_completions"))
+    return {"provider": provider, "model": str(model.get("default") or model.get("model") or ""),
+            "base_url": base_url, "endpoint": endpoint, "local": ollama.private_url(endpoint),
+            "api": "chat_completions" if api == "openai_chat" else api}
+
+
+def local_models(hermes_home: str) -> dict[str, Any]:
+    """This machine's Ollama models (cached 30 s), asked where the first local receptionist points,
+    else OLLAMA_HOST, else loopback."""
+    base = next((desk["endpoint"] for desk in (receptionist(t.path) for t in discover_targets(hermes_home))
+                 if desk["local"]), None)
+    return ollama.list_models(base)
 
 
 # ------------------------------------------------------------------- writing

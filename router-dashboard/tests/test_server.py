@@ -127,6 +127,12 @@ class ServerTestCase(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(text in html, "the page does not say: %s" % text)
 
+    def test_models_say_where_the_local_ones_come_from(self):
+        fake = {"url": "http://127.0.0.1:11434", "reason": "Ollama did not answer (OSError)", "models": []}
+        with mock.patch.object(rs.ollama, "list_models", lambda base=None, **kw: fake):
+            code, body = self.call("/api/models")
+        self.assertEqual((code, body["local"]["reason"]), (200, "Ollama did not answer (OSError)"))
+
     def test_state_lists_profiles_and_use_cases(self):
         code, body = self.call("/api/state")
         self.assertEqual(code, 200)

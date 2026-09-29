@@ -153,7 +153,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(rs.jev_live(self.cfg.hermes_home, since=since))
             return
         if path == "/api/models":
-            self._json({"models": rs.model_catalog(self.cfg.hermes_home)})
+            self._json({"models": rs.model_catalog(self.cfg.hermes_home), "local": rs.local_models(self.cfg.hermes_home)})
             return
         if path == "/api/dispatch/state":
             self._json(ds.state(self.cfg.hermes_home))
