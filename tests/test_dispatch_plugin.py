@@ -19,6 +19,9 @@ plugin = importlib.util.module_from_spec(spec)
 sys.modules["hermes_dispatch_under_test"] = plugin
 spec.loader.exec_module(plugin)
 
+REAL_DISPATCH_TURN = plugin.dispatch.dispatch_turn       # before any test patches it
+QUIET_CODES = ("no_key", "auth_failed", "credits_exhausted", "rate_limited", "overloaded", "network", "timeout",
+               "malformed", "invalid_response", "http_500")
 REQUEST = {"model": "qwen36", "messages": [{"role": "user", "content": "Find the race in the scheduler"}]}
 
 
@@ -129,6 +132,20 @@ class MiddlewareTests(unittest.TestCase):
                          ("called", "hard", 412, True))
         self.assertEqual((row["chat_model"], row["api_mode"]), ("qwen36", "chat_completions"))
         self.assertNotIn("text", row)
+
+    def test_a_jev_failure_adds_nothing_to_the_reply_and_the_row_says_fail_open(self):
+        self.mode("on")
+        self.policy.update(notice="on", profiles={"default": "private"})
+        for code in QUIET_CODES:
+            with self.subTest(code=code), \
+                    mock.patch.object(plugin.dispatch, "dispatch_turn", REAL_DISPATCH_TURN), \
+                    mock.patch.object(plugin.dispatch.route, "load_config",
+                                      lambda path=None: dict(plugin.dispatch.route.DEFAULT_CONFIG)), \
+                    mock.patch.object(plugin.dispatch.client, "ask", side_effect=plugin.dispatch.client.JevError(code)):
+                result, following = self.call(session=f"q-{code}")
+                self.assertEqual((result, following.calls), ("LOCAL-RESPONSE", 1))
+                self.assertIsNone(plugin._on_transform_output(response_text="x", session_id=f"q-{code}", turn_id="t1"))
+                self.assertEqual(self.logs[-1]["jev"], {"call": "fail_open", "error": code, "read": "features"})
 
     def test_the_chat_model_is_never_changed(self):
         self.mode("on")

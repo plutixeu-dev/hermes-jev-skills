@@ -280,6 +280,35 @@ class FrontDeskTests(unittest.TestCase):
             self.assertIn("front desk decides", plugin._jev_command(""))
 
 
+QUIET_CODES = ("no_key", "auth_failed", "credits_exhausted", "rate_limited", "overloaded", "network", "timeout",
+               "malformed", "invalid_response", "http_500")
+
+
+class QuietFailureTests(unittest.TestCase):
+    def test_the_rule_tells_the_chat_model_to_keep_jev_outages_to_itself(self):
+        self.assertIn("never mention a Jev outage", plugin._RULE)
+        self.assertLessEqual(len(plugin._RULE + plugin._RULE_ESCALATION), 1400)     # register()'s max_chars
+
+    def test_a_jev_failure_adds_nothing_to_the_reply(self):
+        config = {**plugin.route.DEFAULT_CONFIG, "tiers": {"hard": {"general": ["openrouter:x/y"]}}}
+        for code in QUIET_CODES:
+            with self.subTest(code=code), \
+                    mock.patch.object(plugin, "_setting",
+                                      lambda name, default: "on" if name in ("routing", "notice") else default), \
+                    mock.patch.object(plugin, "_hermes_config",
+                                      lambda: {"model": {"provider": "openrouter", "default": "x/z"}}), \
+                    mock.patch.object(plugin, "_front_desk_active", lambda: False), \
+                    mock.patch.object(plugin, "_log", lambda entry: None), \
+                    mock.patch.object(plugin.route, "load_config", lambda path=None: config), \
+                    mock.patch.object(plugin.route.client, "ask",
+                                      side_effect=plugin.route.client.JevError(code)):
+                plugin._TURNS.clear()
+                plugin._on_pre_llm_call(session_id="q", turn_id="t1", user_message=HARD)
+                plugin._on_llm_request(request={"model": "x/z", "messages": []}, session_id="q", turn_id="t1",
+                                       model="x/z", provider="openrouter")
+                self.assertIsNone(plugin._on_transform_output(response_text="answer", session_id="q"))
+
+
 class ProfileTests(unittest.TestCase):
     """A gateway that serves several profiles binds each turn's profile with a context-local
     override and leaves HERMES_HOME at the root. Routing's private_profiles depend on it."""

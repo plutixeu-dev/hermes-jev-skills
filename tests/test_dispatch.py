@@ -19,7 +19,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from jevkit import cli, dispatch  # noqa: E402
+from jevkit import cli, dispatch, skillpick, turn  # noqa: E402
 
 
 def line(**fields):
@@ -467,6 +467,26 @@ class ClassifyTests(unittest.TestCase):
 
     def test_a_private_turn_says_jev_read_features(self):
         self.assertEqual(self.classify(klass="private", transport=Wire())["jev"]["read"], "features")
+
+
+class TurnBudgetTests(unittest.TestCase):
+    def test_every_jev_call_inside_a_turn_hook_is_bounded_to_five_seconds(self):
+        """Part 5: a Jev outage never stalls a chat turn beyond this."""
+        seen = []
+
+        def ask(state, questions, *, timeout=4.0, **_):
+            seen.append(timeout)
+            raise dispatch.client.JevError("timeout")
+        config = {**dispatch.route.load_config(NOWHERE), "tiers": {"hard": {"general": ["openrouter:x/y"]}}}
+        skills = [{"name": "a", "description": "does a", "path": "p"}]
+        with mock.patch.object(dispatch.client, "ask", side_effect=ask):
+            dispatch.route.decide("Fix the race in the scheduler", config=config, rows=[])
+            dispatch.classify_with_jev("Fix the race in the scheduler", privacy_class="public",
+                                       policy=dispatch.load_policy(NOWHERE), config=config)
+            skillpick.pick("Fix the race in the scheduler", skills)
+            turn.decide_turn("Fix the race in the scheduler", skills, config=config)
+        self.assertEqual(len(seen), 4, seen)
+        self.assertLessEqual(max(seen), 5.0)
 
 
 class JudgeAnswersTests(unittest.TestCase):
