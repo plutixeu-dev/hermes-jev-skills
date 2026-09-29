@@ -240,8 +240,19 @@ def _find_turn(key: str, turn_id: Any) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _hermes_config() -> Dict[str, Any]:
+    """This profile's config.yaml as Hermes parsed it. Empty outside Hermes or when it cannot be read."""
+    try:
+        from hermes_cli.config import load_config_readonly  # type: ignore
+
+        config = load_config_readonly()
+        return config if isinstance(config, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: str = "", turn_id: Any = None,
-                      api_mode: str = "", **_: Any) -> Any:
+                      api_mode: str = "", model: str = "", provider: str = "", **_: Any) -> Any:
     try:
         policy = dispatch.load_policy()
         mode = _mode(policy)
@@ -255,11 +266,24 @@ def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: st
         first = turn is not None and not turn["claimed"]
         if first:
             turn["claimed"] = True
-    if not first or turn["child"]:
-        return next_call(request)
+    if not first:
+        return next_call(request)                    # a later call of a turn already decided: the tool loop
+    # Hermes passes the running agent's model and provider; the request carries the model too.
+    chat_model = str(model or request.get("model") or "")
+    seen = {"mode": mode, "chat_model": chat_model, "api_mode": api_mode}
     text = turn["text"]
-    if turn["platform"] in (policy.get("skip_platforms") or []) or any(
-            text.lstrip().startswith(prefix) for prefix in (policy.get("skip_prefixes") or [])):
+    skipped = ("a subagent's turn" if turn["child"]
+               else f"a {turn['platform']} turn" if turn["platform"] in (policy.get("skip_platforms") or [])
+               else "a template turn" if any(text.lstrip().startswith(prefix)
+                                             for prefix in (policy.get("skip_prefixes") or []))
+               else "")
+    if skipped:
+        _log({**seen, "agent": dispatch.LOCAL, "jev": {"call": "not_called"}, "reason": f"skipped: {skipped}"})
+        return next_call(request)
+    if frontdesk.is_pinned(chat_model, provider, _hermes_config()):
+        # /model in this chat: the person chose who answers. Not asked, not handed over, this chat only.
+        _log({**seen, "agent": dispatch.LOCAL, "jev": {"call": "not_called"},
+              "reason": "pinned: this chat runs a model chosen with /model, not the receptionist"})
         return next_call(request)
     live = mode == "on" and api_mode == "chat_completions"
     try:
@@ -272,10 +296,12 @@ def _on_llm_execution(request: Any = None, next_call: Any = None, session_id: st
             context_tokens=len(json.dumps(wire, default=str)) // 4,
             interactive=True, run=live, session=_SESSIONS.get(key, ""), policy=policy)
     except Exception as error:  # noqa: BLE001 - the turn goes ahead locally, and the log says why
-        _log({"mode": mode, "agent": dispatch.LOCAL, "reason": f"dispatch failed ({type(error).__name__})"})
+        _log({**seen, "agent": dispatch.LOCAL, "jev": {"call": "fail_open", "error": type(error).__name__},
+              "reason": f"dispatch failed ({type(error).__name__})"})
         return next_call(request)
     turn["decision"] = decision
-    _log({"mode": mode, "live": live, **_summary(decision)})
+    handed_over = bool(live and decision.get("agent") != dispatch.LOCAL and decision.get("text"))
+    _log({**seen, "live": live, "handed_over": handed_over, **_summary(decision)})
     if any(attempt.get("agent") == "claude" for attempt in decision.get("attempts") or []):
         with _LOCK:
             _SESSIONS.pop(key, None)            # a session that failed is not resumed next turn

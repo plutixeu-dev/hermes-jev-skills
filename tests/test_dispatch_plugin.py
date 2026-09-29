@@ -72,6 +72,9 @@ class MiddlewareTests(unittest.TestCase):
 
         for patch in (mock.patch.dict(os.environ, {"HERMES_HOME": self.home.name}),
                       mock.patch.object(plugin, "_log", self.logs.append),
+                      # The receptionist REQUEST names, as Hermes would read it from config.yaml.
+                      mock.patch.object(plugin, "_hermes_config",
+                                        lambda: {"model": {"provider": "custom", "default": "qwen36"}}),
                       mock.patch.object(plugin.dispatch, "load_policy", lambda *a, **k: self.policy),
                       mock.patch.object(plugin.dispatch, "dispatch_turn", side_effect=fake_turn)):
             patch.start()
@@ -79,6 +82,52 @@ class MiddlewareTests(unittest.TestCase):
 
     def mode(self, value):
         self.policy["mode"] = value
+
+    def pinned_turn(self, session, model="gpt-5.5", provider="openai-codex"):
+        plugin._on_pre_llm_call(session_id=session, turn_id="t1", user_message="Find the race", platform="telegram")
+        following = Next()
+        plugin._on_llm_execution(request={**REQUEST, "model": model}, next_call=following, session_id=session,
+                                 turn_id="t1", api_mode="codex_responses", model=model, provider=provider)
+        return following
+
+    def test_a_model_chosen_with_slash_model_skips_jev_for_that_chat_only(self):
+        self.mode("on")
+        following = self.pinned_turn("pinned")
+        self.assertEqual((following.calls, self.dispatched), (1, []))
+        row = self.logs[-1]
+        self.assertEqual((row["jev"], row["chat_model"], row["reason"][:6]), ({"call": "not_called"}, "gpt-5.5", "pinned"))
+        self.call(session="other")                          # a chat on the receptionist is asked as always
+        self.assertEqual(len(self.dispatched), 1)
+
+    def test_the_receptionist_and_its_fallback_are_not_a_pin(self):
+        self.mode("shadow")
+        config = {"model": {"provider": "custom", "default": "qwen36"},
+                  "fallback_providers": [{"provider": "openrouter", "model": "deepseek/deepseek-v4"}]}
+        with mock.patch.object(plugin, "_hermes_config", lambda: config):
+            self.call(session="a")
+            self.pinned_turn("b", model="deepseek/deepseek-v4", provider="openrouter")
+        self.assertEqual(len(self.dispatched), 2)
+
+    def test_a_skipped_turn_still_says_why(self):
+        self.mode("on")
+        self.call(session="c1", platform="cron")
+        self.call(session="c2", text="[kanban] move card 3")
+        self.call(session="c3", parent="parent-session")
+        reasons = [row["reason"] for row in self.logs[-3:]]
+        self.assertEqual(reasons, ["skipped: a cron turn", "skipped: a template turn", "skipped: a subagent's turn"])
+        self.assertTrue(all(row["jev"] == {"call": "not_called"} for row in self.logs[-3:]))
+        self.assertEqual(self.dispatched, [])
+
+    def test_the_chat_model_is_never_changed(self):
+        self.mode("on")
+        self.answer = {"agent": "local", "reason": "standard work stays on this machine", "downgraded": False,
+                       "privacy": "private", "triage": {}, "attempts": []}
+        seen = []
+        plugin._on_pre_llm_call(session_id="s1", turn_id="t1", user_message="Find the race", platform="telegram")
+        plugin._on_llm_execution(request=dict(REQUEST), next_call=lambda request=None: seen.append(request) or "LOCAL",
+                                 session_id="s1", turn_id="t1", api_mode="chat_completions",
+                                 model="qwen36", provider="custom")
+        self.assertEqual(seen, [REQUEST])
 
     def call(self, session="s1", turn="t1", api_mode="chat_completions", parent="", text=None, platform="telegram"):
         plugin._on_pre_llm_call(session_id=session, turn_id=turn, user_message=text or REQUEST["messages"][-1]["content"],
