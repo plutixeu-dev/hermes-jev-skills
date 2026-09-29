@@ -19,6 +19,8 @@ The grid is layered the way `jevkit/route.py` layers it: `~/.config/jev/routing.
 
 Needs PyYAML, which Hermes' own Python already has; `jev dashboard` uses that interpreter when it finds it.
 
+**From another computer** (Hermes on a NAS or server without a browser): `jev dashboard` prints an `ssh -N -L 8791:127.0.0.1:8791 <user>@<host>` line. Run it on your own computer and leave it open, then open http://127.0.0.1:8791 there. Nothing changes on the server side: it stays on loopback, and the tunnel is encrypted.
+
 **Off your own machine** (Tailscale, VPN): `jev dashboard --host <private-ip>`. It refuses to start without a token off loopback, prints a one-time link carrying it, and swaps it for an HttpOnly cookie. The traffic is plain HTTP, so only do this on a network you trust end to end, and never on a public address.
 
 Tests: `python -m unittest discover -s router-dashboard/tests` (with PyYAML installed).

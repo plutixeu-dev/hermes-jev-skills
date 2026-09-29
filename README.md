@@ -92,7 +92,7 @@ The catalog is [models.dev](https://models.dev), filtered to providers whose API
 
 `jev setup-key` opens a one-time page served only by your own computer. You paste your [TypeSafe key](https://console.typesafe.ai/settings/keys) there. It goes straight into the OS secret store (macOS Keychain, or `secret-tool` on Linux, or a 0600 file as a last resort) and, on a Hermes machine, into each profile's `.env`. The agent that ran the command sees one line: stored, verified, yes or no. Never the key, not even a prefix.
 
-The page lives on an unguessable one-time URL, refuses requests with a foreign `Host` header (DNS rebinding), sends no referrer, logs nothing, and shuts down after one use or ten minutes. On a headless box, run `jev setup-key --tty` yourself for a hidden prompt.
+The page lives on an unguessable one-time URL, refuses requests with a foreign `Host` header (DNS rebinding), sends no referrer, logs nothing, and shuts down after one use or ten minutes. On a machine with no browser, `jev setup-key` prints two ways in. One is an `ssh -N -L` line: run it on your own computer and the page opens in the browser there. The other is `jev setup-key --tty`, which you run yourself on that machine for a hidden prompt.
 
 **Do not paste your key into a chat.** If you already did, make a new one.
 
