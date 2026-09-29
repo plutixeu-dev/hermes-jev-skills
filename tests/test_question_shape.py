@@ -20,11 +20,13 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import re
 import sys
 import unittest
 from pathlib import Path
 from typing import Any, Dict, List, Mapping
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -32,6 +34,23 @@ sys.path.insert(0, str(REPO))
 from jevkit import (  # noqa: E402
     choose, client, compact, mailbox, rerank, route, search, skillpick, triage,
 )
+
+
+def setUpModule():
+    """client.ask resolves a key before it touches the fake wire.
+
+    Without one it raises no_key, so these tests passed only where a real key happened to be
+    installed. An obviously fake key in the environment is read first, so the keychain is
+    never consulted either.
+    """
+    patcher = mock.patch.dict(os.environ, {"TYPESAFE_API_KEY": "test-key-not-real"})
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+    # With a key present, a test that forgot its transport would send its data for real.
+    guard = mock.patch.object(client, "_http_transport", side_effect=AssertionError("a test reached the network"))
+    guard.start()
+    unittest.addModuleCleanup(guard.stop)
+
 
 KEY = "sk-test-key"
 

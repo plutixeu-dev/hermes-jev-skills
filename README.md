@@ -6,6 +6,15 @@ Your agent burns frontier-model tokens on things that are not thinking: which mo
 
 That is what [Jev](https://docs.typesafe.ai) is. It is TypeSafe's decision model. **It never writes text.** You give it a state and typed questions (pick one, score this, yes or no) and it answers with a calibrated confidence. This repo wires that into an agent's day.
 
+## What this fork adds
+
+- **Receptionist dispatch** — a turn Jev judges hard goes to Codex, Claude Code or OpenRouter instead of staying on the local model, off by default. Ships as the `hermes-dispatch` plugin, `jev dispatch`, and a card on the dashboard. [receptionist-dispatch.md](docs/receptionist-dispatch.md)
+- **The privacy checks dispatch needed** — a secret value read in every common form (quoted, an env-style `NAME=value`, after a word like "is", or after a Dutch password word), an IBAN matched against the whole registry, Dutch mobile numbers, sensitive Dutch terms, and a privacy class per profile. [receptionist-dispatch.md#privacy-classes](docs/receptionist-dispatch.md#privacy-classes)
+- **Every profile of a multiplexed gateway is itself** — a gateway serving several profiles from one process used to leave every one of them reading as `default`; each now keeps its own profile, which fixes `hermes-jev` routing's `private_profiles` too, not only dispatch. [CHANGELOG.md](CHANGELOG.md)
+- **The dashboard card** — mode and notice switch per profile at once; each profile's privacy class, each agent's on/off, model and (for claude) repo-only flag, and the order they're tried are staged, previewed, then saved together with a backup and a verified read-back. No chat command required. [router-dashboard/README.md](router-dashboard/README.md)
+
+Everything else is upstream hermes-jev-skills. A Dutch guide to installing this fork and connecting the models: [docs/handleiding.md](docs/handleiding.md).
+
 ![The model routing dashboard: the Jev on/shadow/off switch, the routing pools grid, and live decisions as they happen](docs/images/model-routing-dashboard.png)
 
 *`jev dashboard`. The profiles, paths and decisions here are a demo home; the pools are a real working set. `python3 scripts/demo_home.py` builds a home where nothing is real, which is where the next one comes from. One switch for Jev routing, every pool as a tier-by-work-kind grid, and each decision as it happens (tier, work kind, model, which pool it came from, confidence, latency).*
@@ -92,6 +101,11 @@ The page lives on an unguessable one-time URL, refuses requests with a foreign `
 Jev is a cloud API, so this is spelled out rather than implied:
 
 - **Routing**: the user's turn, redacted (emails, phones, tokens, long hex masked), capped at 2,500 characters (`ask_chars`), read as the opening and, mostly, the end. Never history, tool results, files or memory. Turns that look like they hold a secret, and any profile you list in `private_profiles`, send only coarse features: length, whether code is present, whether risk words appear.
+- **Dispatch** (`hermes-dispatch`, off by default): when a turn Jev judged hard is handed to another agent, that agent's provider receives a handoff: the person's message and up to six recent user and assistant turns as they were said, text only, redacted, about 12,000 characters. System prompts, tool output, recalled memory and files are never part of it. It stays on your machine, sent to no one, when:
+  - the profile is highly sensitive (a profile you did not classify counts as one). A gateway that serves several profiles judges each turn by its own profile;
+  - the message, or any turn the handoff would carry, uses one of the built-in words. They are Dutch, and only these count: `cliënt`, `patiënt`, `clienten`, `patienten`, `dossier`, `gespreksverslag`, `behandelplan`, `anamnese`, `medicatie`, `strafblad`, `schulden`, `burgerservicenummer`, `bsn` and `iban`. The longer ones count in any form, plurals and compounds too (`zorgdossier`); `bsn` and `iban` count as whole words. English words do not count, so neither do the singular `client` and `patient`. You can add your own words in `dispatch.json`;
+  - the message or any of those turns holds a secret value: a key, a token, a password. A question about passwords is not one.
+  - Jev reads a public turn as redacted text, and a private one, or any turn with words about passwords, keys or tokens, as coarse features. It is not asked about a highly sensitive turn at all. A public turn that holds contact details counts as private. The rest, rollout and limits included, is in [receptionist-dispatch.md](docs/receptionist-dispatch.md).
 - **Memory**: the query and up to 900 characters per passage, redacted. Your store's ids, paths and sources are replaced with `P0`, `P1`… and never sent. A passage that looks like a credential is not sent at all.
 - **Choosing turns** (`jev compact-select`, or handoffs with `HANDOFF_JEV=1`): the first and last 350 characters of each turn, redacted. Turns that look sensitive are skipped. A default handoff sends Jev nothing.
 - **Skills**: the turn, redacted, plus skill names and descriptions.
@@ -137,6 +151,7 @@ docs/              integration notes and hard-won operational lessons
 | [search-loop.md](docs/search-loop.md) | Running a search as a loop: which results to open, when to stop, and how to write candidate queries so Jev can pick one. |
 | [wiring-triage-into-a-live-pipeline.md](docs/wiring-triage-into-a-live-pipeline.md) | Adding classification to something already carrying real traffic. |
 | [hermes-compaction.md](docs/hermes-compaction.md) | Handoffs on Hermes: what we measured, what ships, and the two search calls that make a handoff enough. |
+| [receptionist-dispatch.md](docs/receptionist-dispatch.md) | Before you turn on `hermes-dispatch`: what a handed-off turn carries and what keeps it here, the privacy classes, rolling it out in shadow, and its limits. |
 | [response-caches.md](docs/response-caches.md) | Before you put a response cache in front of an agent. Why it does little for a Jev loop, and the plan cache we built instead. |
 | [evals/compaction](evals/compaction/README.md) | Measuring handoffs on your own sessions. |
 

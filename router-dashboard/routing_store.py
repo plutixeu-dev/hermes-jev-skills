@@ -19,6 +19,8 @@ import json
 import os
 import re
 import shutil
+import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -69,6 +71,58 @@ JEV_MODE = {
 
 _SAFE_PROVIDER = re.compile(r"^[A-Za-z0-9._\-]*$")
 _SAFE_MODEL = re.compile(r"^[A-Za-z0-9._\-/:@+]*$")
+
+
+# ---------------------------------------------------------------- safe writes
+
+#: One lock for every read-modify-write this dashboard does (here and in dispatch_store).
+#: The server is a ThreadingHTTPServer, so two requests can otherwise interleave their
+#: read, change and replace, and one silently undoes the other. Reentrant, so a locked
+#: caller may call another locked helper.
+WRITE_LOCK = threading.RLock()
+
+
+def write_atomic(path: str, text: str) -> None:
+    """Write `text` to a unique temporary file beside `path`, then os.replace it into place."""
+    directory = os.path.dirname(os.path.abspath(path))
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", suffix=".dashboard-tmp",
+                               dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        # mkstemp makes the file 0600. Keep the mode the file had (or the umask's, for a new one),
+        # so a Hermes running as another user can still read what was saved.
+        try:
+            mode = os.stat(path).st_mode & 0o7777
+        except OSError:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def backup_dir(backup_root: str) -> str:
+    """A new, unique backup folder under `backup_root`, named by its UTC time to the microsecond
+    (plus a counter if two land on the same microsecond). Created here, so it is never shared."""
+    now = time.time()
+    base = time.strftime("%Y%m%dT%H%M%S", time.gmtime(now)) + ".%06dZ" % int((now % 1) * 1_000_000)
+    os.makedirs(backup_root, exist_ok=True)
+    for n in range(10_000):
+        bdir = os.path.join(backup_root, base if n == 0 else "%s-%d" % (base, n))
+        try:
+            os.mkdir(bdir)
+            return bdir
+        except FileExistsError:
+            continue
+    raise OSError(f"no free backup folder under {backup_root}")
 
 
 def _check_safe(value: str, kind: str) -> str:
@@ -404,6 +458,12 @@ def apply_changes(hermes_home: str, config_path: str, changes: dict[str, dict[st
     if rp not in allowed:
         raise ValueError("config path is not a live Hermes config")
 
+    with WRITE_LOCK:
+        return _apply_changes_locked(hermes_home, rp, changes, backup_root)
+
+
+def _apply_changes_locked(hermes_home: str, rp: str, changes: dict[str, dict[str, str]],
+                          backup_root: Optional[str]) -> dict[str, Any]:
     rows = plan(rp, changes)
     if not rows:
         return {"ok": True, "changed": 0, "rows": [], "backup": None,
@@ -412,9 +472,7 @@ def apply_changes(hermes_home: str, config_path: str, changes: dict[str, dict[st
 
     before_hash = _sha256(rp)
     backup_root = backup_root or os.path.join(hermes_home, "backups", "model-routing-dashboard")
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    bdir = os.path.join(backup_root, stamp)
-    os.makedirs(bdir, exist_ok=True)
+    bdir = backup_dir(backup_root)
     backup = os.path.join(bdir, os.path.basename(rp) + "." + hashlib.sha256(rp.encode()).hexdigest()[:8])
     shutil.copy2(rp, backup)
 
@@ -439,10 +497,7 @@ def apply_changes(hermes_home: str, config_path: str, changes: dict[str, dict[st
             text = _set_scalar(text, "auxiliary", "model", _check_safe(spec["model"], "model"),
                                sub=slot_key)
 
-    tmp = rp + ".dashboard-tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, rp)
+    write_atomic(rp, text)
 
     after = read_config(rp)  # raises if we produced invalid YAML
     mismatches = []
@@ -499,6 +554,8 @@ def jev_live(hermes_home: str, since: float = 0.0, limit: int = 200) -> dict[str
 
     The hermes-jev plugin writes decisions only (tier, model, confidence, latency)
     to <profile home>/logs/jev-decisions.jsonl; prompt text is never in that file.
+    The same file also holds `kind: "dispatch"` rows from the hermes-dispatch plugin;
+    those belong to the dispatch panel (dispatch_store.live), not here.
     """
     events: list[dict[str, Any]] = []
     switches: dict[str, dict[str, str]] = {}
@@ -515,7 +572,7 @@ def jev_live(hermes_home: str, since: float = 0.0, limit: int = 200) -> dict[str
                 row = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(row, dict) and float(row.get("ts") or 0) > since:
+            if isinstance(row, dict) and row.get("kind") != "dispatch" and float(row.get("ts") or 0) > since:
                 row.setdefault("profile", name)
                 events.append(row)
     events.sort(key=lambda r: r.get("ts") or 0, reverse=True)
@@ -575,8 +632,31 @@ def jev_switch_state(hermes_home: str) -> dict[str, Any]:
             "plugin_installed": os.path.isdir(os.path.join(hermes_home, "plugins", "hermes-jev"))}
 
 
+def _jev_config_setting(home: str, name: str) -> Any:
+    """hermes-jev's `plugins.entries.hermes-jev.settings.<name>` (or legacy `.config`) in a
+    profile's config.yaml: what the plugin falls back to when no state file sets the switch."""
+    try:
+        with open(os.path.join(home, "config.yaml"), "r", encoding="utf-8") as fh:
+            data = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError):
+        return None
+    entry = ((((data if isinstance(data, dict) else {}).get("plugins") or {}).get("entries") or {})
+             .get("hermes-jev"))
+    if not isinstance(entry, dict):
+        return None
+    for section in ("settings", "config"):
+        block = entry.get(section)
+        if isinstance(block, dict) and block.get(name) is not None:
+            return block.get(name)
+    return None
+
+
 def set_jev_switch(hermes_home: str, scope: str, name: str, value: str) -> dict[str, Any]:
     """scope "__all__" writes the shared default AND clears that switch in every profile, so it really is all.
+
+    The default profile's own switch lives in the same root file every other profile inherits
+    from, so changing "default" first pins each other profile's current value (only where that
+    profile has no value of its own), then changes the root: only the default profile changes.
 
     The hermes-jev plugin reads these files on every turn, so this takes effect at once: no restart.
     """
@@ -586,31 +666,42 @@ def set_jev_switch(hermes_home: str, scope: str, name: str, value: str) -> dict[
     if scope != "__all__" and scope not in homes:
         raise ValueError(f"unknown profile: {scope!r}")
 
-    def write(home: str, mutate) -> None:
-        path = os.path.join(home, "jev", "state.json")
+    def read(home: str) -> dict[str, Any]:
         try:
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(os.path.join(home, "jev", "state.json"), "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            data = data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
-            data = {}
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError, RecursionError):
+            return {}
+
+    def write(home: str, mutate) -> None:
+        data = read(home)
         before = dict(data)
         mutate(data)
         if data == before:
             return
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".dashboard-tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
-        os.replace(tmp, path)
+        write_atomic(os.path.join(home, "jev", "state.json"), json.dumps(data, indent=2))
 
-    if scope == "__all__":
-        write(hermes_home, lambda d: d.__setitem__(name, value))
-        for pname, home in homes.items():
-            if home != hermes_home:
-                write(home, lambda d: d.pop(name, None))
-    elif homes[scope] == hermes_home:
-        write(hermes_home, lambda d: d.__setitem__(name, value))
-    else:
-        write(homes[scope], lambda d: d.__setitem__(name, value))
+    with WRITE_LOCK:
+        if scope == "__all__":
+            write(hermes_home, lambda d: d.__setitem__(name, value))
+            for pname, home in homes.items():
+                if home != hermes_home:
+                    write(home, lambda d: d.pop(name, None))
+        elif homes[scope] == hermes_home:
+            shared = read(hermes_home).get(name)
+            for pname, home in homes.items():
+                own = read(home) if home != hermes_home else {}
+                if home == hermes_home or own.get(name) is not None:
+                    continue
+                # What the plugin gives this profile now ({**shared, **own}, then config.yaml, then
+                # off); an own `null` hides the shared value, as it does in the plugin's merge.
+                current = shared if shared is not None and name not in own else None
+                if current is None:
+                    current = _jev_config_setting(home, name)
+                pinned = str(current if current is not None else "off").lower()
+                write(home, lambda d, v=pinned: d.__setitem__(name, v))
+            write(hermes_home, lambda d: d.__setitem__(name, value))
+        else:
+            write(homes[scope], lambda d: d.__setitem__(name, value))
     return {"ok": True, "scope": scope, "switch": name, "value": value, **jev_switch_state(hermes_home)}

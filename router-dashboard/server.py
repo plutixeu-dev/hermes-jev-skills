@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import dispatch_store as ds  # noqa: E402
 import routing_store as rs  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -154,10 +155,55 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/models":
             self._json({"models": rs.model_catalog(self.cfg.hermes_home)})
             return
+        if path == "/api/dispatch/state":
+            self._json(ds.state(self.cfg.hermes_home))
+            return
+        if path == "/api/dispatch/live":
+            from urllib.parse import parse_qs
+            query = parse_qs(self.path.split("?", 1)[1]) if "?" in self.path else {}
+            try:
+                since = float((query.get("since") or ["0"])[0])
+            except ValueError:
+                since = 0.0
+            self._json(ds.live(self.cfg.hermes_home, since=since))
+            return
         self._json({"error": "not found"}, 404)
+
+    def _allowed_hosts(self) -> set[str]:
+        """The Host values that name this server: loopback on its port, and its bound address."""
+        bound_host, port = self.server.server_address[:2]
+        hosts = {"127.0.0.1:%d" % port, "localhost:%d" % port, "[::1]:%d" % port}
+        hosts.add(("[%s]:%d" if ":" in bound_host else "%s:%d") % (bound_host, port))
+        return hosts
+
+    def _cross_site_refusal(self) -> Optional[tuple[int, str]]:
+        """Why this POST must be refused as possibly cross-site, or None.
+
+        With no token (the default loopback setup), any page the person visits could otherwise
+        POST here: a text/plain form needs no preflight, and a DNS-rebound name reaches
+        127.0.0.1 under its own Host. So: a JSON Content-Type (which a cross-site page cannot
+        send without a preflight this server never answers), an Origin, when sent, equal to
+        http://<Host>, and a Host that names this server. With a token the Host may be any
+        address the machine is reached by (a rebound page never has the token)."""
+        ctype = (self.headers.get("Content-Type") or "").strip().lower()
+        if not ctype.startswith("application/json"):
+            return 415, "POST bodies must be sent as application/json"
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host:
+            return 403, "missing Host header"
+        if not self.cfg.token and host not in self._allowed_hosts():
+            return 403, "Host %r does not name this dashboard" % host
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.strip().lower() != "http://" + host:
+            return 403, "cross-origin request refused"
+        return None
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        refusal = self._cross_site_refusal()
+        if refusal:
+            self._json({"error": refusal[1]}, refusal[0])
+            return
         if not self._authed(self.path):
             self._json({"error": "unauthorized"}, 401)
             return
@@ -176,6 +222,39 @@ class Handler(BaseHTTPRequestHandler):
                                              str(payload.get("switch") or ""), str(payload.get("value") or "")))
             except ValueError as exc:
                 self._json({"error": str(exc)}, 400)
+            return
+
+        if path in ("/api/dispatch/switch", "/api/dispatch/plan", "/api/dispatch/apply",
+                    "/api/dispatch/cooldown", "/api/dispatch/test"):
+            if not isinstance(payload, dict):
+                self._json({"error": "request body must be a JSON object"}, 400)
+                return
+            if (path == "/api/dispatch/switch" and payload.get("scope") == "__all__"
+                    and payload.get("confirm") is not True):
+                self._json({"error": "changing every profile requires confirm:true"}, 400)
+                return
+            if path == "/api/dispatch/apply" and payload.get("confirm") is not True:
+                self._json({"error": "apply requires confirm:true"}, 400)
+                return
+            if path == "/api/dispatch/test" and payload.get("confirm") is not True:
+                self._json({"error": "a test call requires confirm:true"}, 400)
+                return
+            try:
+                if path == "/api/dispatch/switch":
+                    self._json(ds.set_switch(self.cfg.hermes_home, str(payload.get("scope") or ""),
+                                             str(payload.get("switch") or ""), str(payload.get("value") or "")))
+                elif path == "/api/dispatch/plan":
+                    self._json(ds.plan(self.cfg.hermes_home, payload.get("changes")))
+                elif path == "/api/dispatch/apply":
+                    self._json(ds.apply(self.cfg.hermes_home, payload.get("changes")))
+                elif path == "/api/dispatch/cooldown":
+                    self._json(ds.reset_cooldown(self.cfg.hermes_home, str(payload.get("agent") or "")))
+                else:  # /api/dispatch/test
+                    self._json(ds.test_agent(self.cfg.hermes_home, str(payload.get("agent") or "")))
+            except ValueError as exc:
+                self._json({"error": str(exc)}, 400)
+            except Exception as exc:  # noqa: BLE001 - reported to the caller as a diagnosable 500
+                self._json({"error": f"{type(exc).__name__}: {exc}"}, 500)
             return
 
         profile = str(payload.get("profile") or "")
@@ -226,6 +305,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--token", default=None)
     ap.add_argument("--hermes-home", default=os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes"))
     args = ap.parse_args(argv)
+    # jevkit's ladder and keystore read HERMES_HOME from the environment; without this, a
+    # --hermes-home passed only on the command line would leave them looking at a different
+    # home than the one the page shows (e.g. a fleet-wide cooldown clear or key check).
+    os.environ.setdefault("HERMES_HOME", args.hermes_home)
 
     cfg = Config(hermes_home=args.hermes_home, token=args.token)
     httpd = make_server(args.host, args.port, cfg)

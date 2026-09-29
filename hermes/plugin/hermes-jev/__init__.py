@@ -30,6 +30,16 @@ _CTX: Any = None
 # ── settings ─────────────────────────────────────────────────────────────────
 
 def _home() -> Path:
+    """The turn's own profile. A gateway that serves several profiles binds each turn's profile
+    with a context-local override and leaves HERMES_HOME at the root: read alone, the variable
+    made every profile "default", and routing's private_profiles never matched."""
+    try:
+        from hermes_constants import get_hermes_home_override  # type: ignore
+        override = get_hermes_home_override()
+        if override:
+            return Path(override)
+    except Exception:  # noqa: BLE001 - outside Hermes, or an older one
+        pass
     return Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
 
 
@@ -46,7 +56,7 @@ def _read(path: Path) -> Dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         return data if isinstance(data, dict) else {}
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError, RecursionError):      # ValueError: bad JSON, or bytes that are not UTF-8
         return {}
 
 

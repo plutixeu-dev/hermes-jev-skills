@@ -4,7 +4,10 @@ The plugin module is loaded from the repo and its Jev call is replaced with a sp
 so these tests never touch the network, the real decision log or the real key.
 """
 import importlib.util
+import os
 import sys
+import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -187,6 +190,44 @@ class MergedRequestTests(unittest.TestCase):
         self.assertEqual(self.picks, [], "skill selection is not re-asked inside the same failure")
         self.assertEqual(self.decisions[0]["answers"], None)
         self.assertEqual(plugin._TURNS["s-merge"]["route_answers"], None)
+
+
+class ProfileTests(unittest.TestCase):
+    """A gateway that serves several profiles binds each turn's profile with a context-local
+    override and leaves HERMES_HOME at the root. Routing's private_profiles depend on it."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.home = self.root / "profiles" / "secondbrain"
+        patch = mock.patch.dict(os.environ, {"HERMES_HOME": str(self.root)})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def constants(self, override):
+        fake = types.ModuleType("hermes_constants")
+        fake.get_hermes_home_override = lambda: override
+        return mock.patch.dict(sys.modules, {"hermes_constants": fake})
+
+    def test_the_turns_profile_is_the_one_the_gateway_bound(self):
+        with self.constants(str(self.home)):
+            self.assertEqual(plugin._profile(), "secondbrain")
+            self.assertEqual(plugin._state_path(), self.home / "jev" / "state.json")
+            self.assertEqual(plugin._state_path(shared=True), self.root / "jev" / "state.json")
+
+    def test_a_switch_file_that_is_not_utf8_reads_as_no_switches(self):
+        """dispatch reads this file too, to stand aside for routing: it must not raise."""
+        path = self.root / "jev" / "state.json"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b'{"routing": "\xff"}')
+        self.assertEqual(plugin._read(path), {})
+
+    def test_without_an_override_hermes_home_decides(self):
+        with self.constants(None):
+            self.assertEqual(plugin._profile(), "default")
+        with mock.patch.dict(sys.modules, {"hermes_constants": types.ModuleType("hermes_constants")}):
+            self.assertEqual(plugin._profile(), "default")          # an older Hermes: no override at all
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@
   select.changed,input.changed{border-color:var(--warn);box-shadow:0 0 0 1px var(--warn) inset}
   .badge{font-size:11px;border-radius:999px;padding:2px 8px;border:1px solid var(--line);color:var(--dim)}
   .badge.changed{color:#1b1400;background:var(--warn);border-color:transparent;font-weight:650}
+  .badge.new{color:#04201a;background:var(--accent);border-color:transparent;font-weight:650}
   .splitbar{display:flex;height:26px;border-radius:8px;overflow:hidden;border:1px solid var(--line)}
   .splitbar div{display:flex;align-items:center;justify-content:center;font-size:11px;color:#06121a;
     overflow:hidden;white-space:nowrap}
@@ -109,6 +110,26 @@
   .seg button.on[data-v=on]{background:var(--ok)}
   .seg button.on[data-v=shadow]{background:var(--accent2);color:#0b0e14}
   .jevrow{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin:0 0 12px}
+  /* Receptionist dispatch (new in this fork). */
+  #dispatchCard h3{font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);font-weight:600;
+    margin:22px 0 8px}
+  #dispPrivacy tr.cur td{background:rgba(94,234,212,.06)}
+  #dispPrivacy tr.cur td:first-child{color:var(--accent);font-weight:650}
+  #dispPrivacy td .muted{font-weight:400}
+  #dispAgents,#dispLive{table-layout:auto}
+  #dispAgents td{vertical-align:top}
+  #dispAgents input[type=text]{min-width:170px}
+  #dispAgents label{display:flex;align-items:center;gap:6px;white-space:nowrap;margin:2px 0}
+  #dispAgents label.changed,#dispOrder span.changed{color:var(--warn)}
+  #dispOrderRows>div{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 6px}
+  #dispLive td{font-size:13px;white-space:nowrap}
+  #dispLive td.wrap{white-space:normal;min-width:220px}
+  #dispatchCard .ok{color:var(--ok)}
+  #dispatchCard .warn{color:var(--warn)}
+  #dispatchCard .fail{color:var(--bad)}
+  #dispatchCard button:disabled{opacity:.45;cursor:not-allowed}
+  .checks{list-style:none;margin:0;padding:0}
+  .checks li{margin:4px 0}
   @media (max-width:700px){
     main{padding:12px}
     header{padding:10px 12px;gap:10px}
@@ -119,6 +140,11 @@
     .splitbar div{font-size:9.5px}
     header .pill{font-size:11px}
     .profiles button{padding:6px 11px;font-size:13.5px}
+    /* One agent per block: a five-column row pushed Model, Status and Test off the screen. */
+    #dispAgents thead{display:none}
+    #dispAgents,#dispAgents tbody,#dispAgents tr,#dispAgents td{display:block;width:100%}
+    #dispAgents tr{border-bottom:1px solid var(--line);padding:8px 0}
+    #dispAgents td{border:0;padding:3px 0}
   }
 </style>
 </head>
@@ -147,6 +173,78 @@
     </div>
     <div class="small muted" id="jevCounts" style="margin:0 0 10px"></div>
     <div class="small" id="jevBody"></div>
+  </div>
+
+  <div class="card" id="dispatchCard">
+    <h2>Receptionist dispatch <span class="badge new" id="dispatchNew">new in this fork</span></h2>
+    <p style="margin:0 0 4px">Added in this fork: the upstream hermes-jev-skills has no dispatch.</p>
+    <p class="small muted" style="margin:0 0 14px">A turn Jev judges hard goes to Claude Code, ChatGPT (Codex) or
+      OpenRouter when the profile's privacy allows it; everything else is answered on this machine. The answer comes
+      back unchanged, with one line naming who wrote it.</p>
+    <div id="dispWarn"></div>
+    <div class="jevrow">
+      <div class="seg" id="dispSeg" role="group" aria-label="Dispatch mode">
+        <button data-v="off">Off</button><button data-v="shadow">Shadow</button><button data-v="on">On</button>
+      </div>
+      <span class="small" id="dispScope"></span>
+    </div>
+    <div class="small muted" id="dispCounts"></div>
+    <div class="note dead" id="dispConflict" style="display:none">
+      <span id="dispConflictText"></span>
+      <div style="margin-top:8px"><button id="dispConflictFix"></button></div>
+    </div>
+    <div class="small" style="margin:12px 0 0">
+      <label class="inline"><input type="checkbox" id="dispNotice"> Say so when a hard turn was answered here.</label>
+      <span class="muted">(only while dispatch is On)</span>
+    </div>
+
+    <h3>Privacy</h3>
+    <div class="livewrap"><table id="dispPrivacy">
+      <thead><tr><th style="width:38%">Profile</th><th>Where its hard turns may go</th></tr></thead>
+      <tbody id="dispPrivacyBody"></tbody>
+    </table></div>
+    <p class="small muted" style="margin:10px 0 0">Profiles not listed in dispatch.json: <span id="dispDefaultPrivacy">only this machine</span>.
+      Turns holding a password, an IBAN, a phone number or words like cliënt, dossier or BSN stay here whatever the class.</p>
+
+    <h3>Agents</h3>
+    <div class="livewrap"><table id="dispAgents">
+      <thead><tr><th>Agent</th><th>Use</th><th>Model</th><th>Status</th><th>Test</th></tr></thead>
+      <tbody id="dispAgentsBody"></tbody>
+    </table></div>
+    <p class="small muted" style="margin:10px 0 0">An empty model means the CLI's own default; OpenRouter needs one.
+      Test sends one fixed message with the saved settings, not unsaved edits.</p>
+    <datalist id="dispModels-claude"></datalist>
+    <datalist id="dispModels-openai"></datalist>
+    <datalist id="dispModels-openrouter"></datalist>
+
+    <h3>Order</h3>
+    <div id="dispOrder">
+      <div id="dispOrderRows"></div>
+      <p class="small muted" style="margin:4px 0 0">OpenRouter: last resort, public turns only.</p>
+    </div>
+
+    <div class="inline" style="margin-top:18px;flex-wrap:wrap">
+      <button class="primary" id="dispPreviewBtn" disabled>Preview dispatch changes</button>
+      <button class="ghost" id="dispDiscardBtn" style="display:none">Discard</button>
+      <span class="small muted">Privacy, agents and order are saved together, to dispatch.json.</span>
+    </div>
+    <div id="dispPreview" style="display:none;margin-top:12px">
+      <div class="note dead" id="dispPlanErr" style="display:none;margin:0"></div>
+      <pre id="dispPlanRows" style="margin:0"></pre>
+      <div class="inline" style="margin-top:10px"><button class="primary" id="dispConfirmBtn">Confirm &amp; save</button></div>
+    </div>
+    <div id="dispReceipt" style="margin-top:12px"></div>
+
+    <h3>Checks</h3>
+    <div id="dispChecks"></div>
+
+    <h3>Recent dispatch decisions</h3>
+    <div class="livewrap"><table id="dispLive">
+      <thead><tr><th>Time</th><th>Profile</th><th>Mode</th><th>Answered by</th><th>Privacy</th><th>Level</th>
+        <th>Reason</th><th>Attempts</th></tr></thead>
+      <tbody id="dispLiveBody"></tbody>
+    </table></div>
+    <p class="small muted" id="dispLiveEmpty" style="margin:10px 0 0"></p>
   </div>
 
   <div class="card" id="poolCard">
@@ -234,8 +332,7 @@
     <h3 id="allTitle">Change this for every agent?</h3>
     <p id="allText" style="margin:0 0 10px"></p>
     <pre id="allRows" style="max-height:180px"></pre>
-    <p class="small muted" style="margin:10px 0 0">Each profile's config is backed up first. Running agents keep
-      their current model until their gateway reloads.</p>
+    <p class="small muted" id="allFoot" style="margin:10px 0 0"></p>
     <div class="acts">
       <button class="ghost" id="allCancel">Cancel</button>
       <button class="danger" id="allGo">Yes, change all</button>
@@ -411,6 +508,7 @@ async function loadPools(){
 
 function renderAll(){
   renderSwitch();
+  renderDispatch();
   renderProfiles();
   renderPools();
   renderSplit();
@@ -555,7 +653,7 @@ async function load(){
   fillModels(m);
   $("#homeLabel").textContent = STATE.hermes_home;
   $("#countLabel").textContent = STATE.profiles.length + " profiles";
-  renderJev(); renderAll(); loadSwitches(); loadPools();
+  renderJev(); renderAll(); loadSwitches(); loadPools(); loadDispatch(); loadDispatchLive();
   const errs = STATE.profiles.filter(p => p.error);
   if (errs.length) console.warn("profiles with read errors", errs);
 }
@@ -570,6 +668,7 @@ function fillModels(m){
     const d = document.createElement("datalist"); d.id = "providerList"; document.body.appendChild(d); return d; })();
   pl.innerHTML = ""; [...new Set(MODELS.map(x => x.provider).filter(Boolean))].forEach(p => {
     const o = document.createElement("option"); o.value = p; pl.appendChild(o); });
+  fillDispatchModels();
 }
 
 $("#refreshBtn").onclick = load;
@@ -617,13 +716,18 @@ $("#discardBtn").onclick = () => {
   PENDING.clear(); $("#previewCard").style.display = "none"; renderAll();
 };
 
-function askAll(changes, count){
+/* The small print is model routing's: a config backed up, then a gateway reload. A caller whose write
+   works otherwise passes its own. */
+const ALL_FOOT = "Each profile's config is backed up first. Running agents keep their current model until their gateway reloads.";
+
+function askAll(changes, count, note = ALL_FOOT){
   return new Promise(resolve => {
     const lines = Object.entries(changes).flatMap(([k, f]) => Object.entries(f).map(([field, v]) =>
       (k === "__main__" ? "main model" : k) + " " + field + " → " + v));
     $("#allText").textContent = "This is not just one agent. It sets the following as the default for " + count +
       " Hermes profiles at once:";
     $("#allRows").textContent = lines.join("\n");
+    $("#allFoot").textContent = note;
     $("#allGo").textContent = "Yes, change all " + count;
     const modal = $("#allModal"); modal.classList.add("open");
     const done = v => { modal.classList.remove("open"); resolve(v); };
@@ -705,8 +809,419 @@ document.querySelectorAll("#jevSeg button").forEach(b => b.onclick = async () =>
   const r = await fetch("/api/jev/switch", {method:"POST", headers:{"Content-Type":"application/json", ...HDR},
     body: JSON.stringify({scope: all ? ALL : CURRENT, switch: "routing", value, confirm: all})}).then(x => x.json());
   if (r.error){ alert(r.error); return; }
-  SWITCHES = r; renderSwitch(); if (LIVE_TIMER) pollLive();
+  SWITCHES = r; renderSwitch();
+  loadDispatch();                   // the dispatch card's conflict note reads this same switch
+  if (LIVE_TIMER) pollLive();
 });
+
+/* --- Receptionist dispatch ---
+   New in this fork: the upstream hermes-jev-skills has no dispatch. Mode and notice switch at once, like the
+   Jev switch, in each profile's jev/dispatch-state.json (the file /dispatch writes). Privacy, agents and order
+   are staged, previewed, then saved together to <hermes root>/jev/dispatch.json with a backup and a verified
+   read-back. The plugin reads both files on every turn, so nothing here restarts anything. */
+const CLAUDE_MODELS = ["opus", "sonnet", "haiku"];    // dispatch_store.CLAUDE_MODELS; any valid id works
+const DISP_AGENTS = [["claude", "Claude Code"], ["openai", "ChatGPT (Codex)"], ["openrouter", "OpenRouter"]];
+const DISP_LABEL = Object.fromEntries(DISP_AGENTS);
+const DISP_PRIVACY = [["highly_sensitive", "Only this machine"], ["private", "May go to an agent"],
+                      ["public", "Public (OpenRouter too)"]];
+const DISP_SOURCE = {"dashboard": "set here", "config.yaml": "from config.yaml",
+                     "dispatch.json": "from dispatch.json", "default": "default"};
+const DISP_ORDERS = [["repo", "Repository work"], ["default", "Other hard work"]];
+const DISP_FRONTIER = ["claude", "openai"];            // all that frontier_order may hold
+const DISP_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/@+\[\]-]{0,127}$/;   // jevkit.agents._MODEL_NAME; the server decides
+/* askAll's own small print is model routing's (a backup, then a reload). These writes have neither. */
+const DISP_ALL_NOTE = "Each profile's own switch file is overwritten; there is no backup. It takes effect on the next message, no restart.";
+const DISP_JEV_OFF_NOTE = "Jev routing turns off for every profile on the next message, no restart. Its switch files are rewritten; there is no backup.";
+let DISPATCH = null, DISP_PENDING = {profiles: {}, agents: {}, order: {}}, DISP_PLANNED = null;
+let DISP_TESTS = {}, DISP_SEEN = 0;
+
+/* A refusal (400/500) and a failed request both come back as {error}. */
+function dispPost(path, body){
+  return fetch(path, {method:"POST", headers:{"Content-Type":"application/json", ...HDR}, body: JSON.stringify(body)})
+    .then(x => x.json()).catch(e => ({error: String(e)}));
+}
+
+async function loadDispatch(){
+  const r = await fetch("/api/dispatch/state", {headers: HDR}).then(x => x.json()).catch(e => ({error: String(e)}));
+  if (!r || r.error){
+    $("#dispWarn").innerHTML = '<div class="note dead" style="margin:0 0 12px">Dispatch settings could not be read: ' +
+      esc(r ? r.error : "no answer") + "</div>";
+    return;
+  }
+  $("#dispWarn").innerHTML = "";
+  DISPATCH = r; renderDispatch();
+}
+
+function renderDispatch(){
+  if (!DISPATCH || !STATE) return;
+  renderDispMode(); renderDispPrivacy(); renderDispAgents(); renderDispOrder(); renderDispSave(); renderDispChecks();
+}
+
+/* The profiles the picker points at: every one for "All profiles", else just the current one. */
+function dispScope(){
+  const names = Object.keys(DISPATCH.profiles);
+  return CURRENT === ALL ? names : names.filter(n => n === CURRENT);
+}
+
+/* The plugin treats anything but shadow or on as off. */
+const dispMode = p => ["shadow", "on"].includes(p.mode.value) ? p.mode.value : "off";
+
+function renderDispMode(){
+  const all = CURRENT === ALL, scope = dispScope(), profs = scope.map(n => DISPATCH.profiles[n]);
+  const modes = [...new Set(profs.map(dispMode))];
+  const mode = modes.length === 1 ? modes[0] : null;          // mixed: nothing highlighted
+  document.querySelectorAll("#dispSeg button").forEach(b => b.classList.toggle("on", b.dataset.v === mode));
+  const sources = [...new Set(profs.map(p => p.mode.source))];
+  const source = sources.length === 1 ? DISP_SOURCE[sources[0]] || sources[0] : "set in different places";
+  $("#dispScope").innerHTML = !scope.length ? "<span class='muted'>Pick a profile above.</span>"
+    : (all ? "Dispatch for <b>all " + scope.length + " profiles</b>" : "Dispatch for <b>" + esc(CURRENT) + "</b>") +
+      " <span class='muted'>(" + (mode ? esc(source) : "currently mixed") + ")</span>";
+  const every = Object.values(DISPATCH.profiles).map(dispMode);
+  const count = v => every.filter(x => x === v).length;
+  $("#dispCounts").textContent = "Right now: " + count("on") + " on · " + count("shadow") + " shadow · " + count("off") +
+    " off.  On = a hard turn goes to an agent. Shadow = dispatch decides and logs, this machine still answers." +
+    " Takes effect on the next message, no restart.";
+
+  const clash = scope.filter(n => DISPATCH.profiles[n].conflict), by = {};
+  clash.forEach(n => { const v = DISPATCH.profiles[n].jev_routing; (by[v] = by[v] || []).push(n); });
+  $("#dispConflict").style.display = clash.length ? "" : "none";
+  $("#dispConflictText").textContent = "Jev routing is " +
+    Object.entries(by).map(([v, names]) => v + " for " + names.join(", ")).join(" and ") +
+    ". Only one of them decides a turn, so dispatch stands aside there.";
+  $("#dispConflictFix").textContent = "Turn Jev routing off for " + (all ? "all profiles" : CURRENT);
+
+  const notices = [...new Set(profs.map(p => p.notice.value === "on"))], box = $("#dispNotice");
+  box.indeterminate = notices.length > 1;
+  box.checked = notices.length === 1 && notices[0];
+}
+
+async function dispSwitch(name, value){
+  if (!DISPATCH) return;
+  const all = CURRENT === ALL;
+  if (all && !(await askAll({"Receptionist dispatch": {[name]: value}}, Object.keys(DISPATCH.profiles).length,
+                            DISP_ALL_NOTE))){
+    renderDispMode(); return;                                  // puts the notice box back
+  }
+  const r = await dispPost("/api/dispatch/switch", {scope: all ? ALL : CURRENT, switch: name, value, confirm: all});
+  if (r.error){ alert(r.error); renderDispMode(); return; }
+  DISPATCH = r; renderDispatch();
+}
+document.querySelectorAll("#dispSeg button").forEach(b => b.onclick = () => dispSwitch("mode", b.dataset.v));
+$("#dispNotice").onchange = () => dispSwitch("notice", $("#dispNotice").checked ? "on" : "off");
+
+/* One classifier per turn: while Jev routing is on or in shadow, dispatch stands aside. */
+$("#dispConflictFix").onclick = async () => {
+  const all = CURRENT === ALL;
+  if (all && !(await askAll({"Jev routing": {mode: "off"}}, Object.keys(DISPATCH.profiles).length,
+                            DISP_JEV_OFF_NOTE))) return;
+  const r = await dispPost("/api/jev/switch", {scope: all ? ALL : CURRENT, switch: "routing", value: "off", confirm: all});
+  if (r.error){ alert(r.error); return; }
+  SWITCHES = r; renderSwitch(); if (LIVE_TIMER) pollLive();
+  await loadDispatch();
+};
+
+/* Stage one edit, or drop it when it puts back what is saved. Any edit makes a preview on screen stale. */
+function dispStage(section, key, field, value){
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b), box = DISP_PENDING[section];
+  if (section === "agents"){
+    const fields = Object.assign({}, box[key]);
+    if (same(value, (DISPATCH.agents[key] || {})[field])) delete fields[field]; else fields[field] = value;
+    if (Object.keys(fields).length) box[key] = fields; else delete box[key];
+  } else {
+    const saved = section === "profiles" ? (DISPATCH.profiles[key] || {privacy: {}}).privacy.value
+      : (DISPATCH.order || {})[key];
+    if (same(value, saved)) delete box[key]; else box[key] = value;
+  }
+  DISP_PLANNED = null; $("#dispPreview").style.display = "none";
+  renderDispSave();
+}
+
+function renderDispPrivacy(){
+  const body = $("#dispPrivacyBody"); body.innerHTML = "";
+  Object.entries(DISPATCH.profiles).forEach(([name, p]) => {
+    const staged = DISP_PENDING.profiles[name];
+    const tr = document.createElement("tr");
+    if (name === CURRENT) tr.className = "cur";
+    tr.innerHTML = "<td>" + esc(name) + "<div class='small muted'>" +
+      (p.privacy.source === "dispatch.json" ? "listed in dispatch.json" : "not listed") + "</div></td><td></td>";
+    const sel = document.createElement("select");
+    sel.setAttribute("aria-label", "Privacy for " + name);
+    DISP_PRIVACY.forEach(([v, label]) => sel.add(new Option(label, v)));
+    sel.value = staged !== undefined ? staged : p.privacy.value;
+    sel.classList.toggle("changed", staged !== undefined);
+    sel.onchange = () => {
+      dispStage("profiles", name, null, sel.value);
+      sel.classList.toggle("changed", name in DISP_PENDING.profiles);
+    };
+    tr.children[1].appendChild(sel);
+    body.appendChild(tr);
+  });
+  const d = DISP_PRIVACY.find(([v]) => v === DISPATCH.default_privacy) || DISP_PRIVACY[0];
+  $("#dispDefaultPrivacy").textContent = d[1].charAt(0).toLowerCase() + d[1].slice(1);
+}
+
+const dispStaged = (agent, field) => field in (DISP_PENDING.agents[agent] || {});
+const dispValue = (agent, field) => dispStaged(agent, field) ? DISP_PENDING.agents[agent][field]
+  : (DISPATCH.agents[agent] || {})[field];
+
+function dispCheck(agent, field, text){
+  const label = document.createElement("label"), box = document.createElement("input");
+  box.type = "checkbox"; box.checked = !!dispValue(agent, field);
+  label.classList.toggle("changed", dispStaged(agent, field));
+  box.onchange = () => {
+    dispStage("agents", agent, field, box.checked);
+    label.classList.toggle("changed", dispStaged(agent, field)); dispHint(agent);
+  };
+  label.append(box, " " + text);
+  return label;
+}
+
+/* A light check only: the server refuses a bad id, and the preview shows its words. */
+function dispHint(agent){
+  const model = dispValue(agent, "model") || "";
+  $("#dispHint-" + agent).textContent = model && !DISP_MODEL.test(model) ? "That does not look like a model id."
+    : agent === "openrouter" && dispValue(agent, "enabled") && !model ? "OpenRouter needs a model." : "";
+}
+
+function renderDispAgents(){
+  const body = $("#dispAgentsBody"); body.innerHTML = "";
+  DISP_AGENTS.forEach(([name, label]) => {
+    const a = DISPATCH.agents[name] || {}, tr = document.createElement("tr");
+    const use = document.createElement("td"), model = document.createElement("td");
+    const status = document.createElement("td"), test = document.createElement("td");
+    use.appendChild(dispCheck(name, "enabled", "On"));
+    if (name === "claude") use.appendChild(dispCheck(name, "only_repo", "Only repository work"));
+
+    const input = document.createElement("input");
+    input.type = "text"; input.value = dispValue(name, "model") || "";
+    input.setAttribute("list", "dispModels-" + name); input.setAttribute("aria-label", label + " model");
+    input.placeholder = name === "openrouter" ? "needs a model" : "the CLI's own default";
+    input.classList.toggle("changed", dispStaged(name, "model"));
+    input.oninput = () => {
+      dispStage("agents", name, "model", input.value.trim());
+      input.classList.toggle("changed", dispStaged(name, "model")); dispHint(name);
+    };
+    const hint = document.createElement("div");
+    hint.className = "small warn"; hint.id = "dispHint-" + name;
+    model.append(input, hint);
+
+    status.className = "small";
+    status.innerHTML = name === "openrouter"
+      ? (DISPATCH.openrouter_key ? "<span class='ok'>key present</span>"
+         : "<span class='warn'>no key: run <code>jev setup-key --provider openrouter</code></span>")
+      : (a.available ? "<span class='ok'>found</span>" : "<span class='warn'>not found</span>");
+    if (a.cooling_s > 0){
+      const line = document.createElement("div"), reset = document.createElement("button");
+      line.className = "inline"; line.style.marginTop = "6px";
+      line.innerHTML = "<span class='warn'>cooling " + esc(a.cooling_s) + " s</span>";
+      reset.className = "ghost"; reset.textContent = "Reset";
+      reset.setAttribute("aria-label", "Reset the cooldown of " + label);
+      reset.onclick = () => dispCooldown(name);
+      line.appendChild(reset); status.appendChild(line);
+    }
+
+    const btn = document.createElement("button"), out = document.createElement("span");
+    btn.id = "dispTestBtn-" + name; btn.textContent = "Test"; btn.setAttribute("aria-label", "Test " + label);
+    btn.onclick = () => dispTest(name, label);
+    out.id = "dispTest-" + name; out.setAttribute("aria-live", "polite");
+    test.append(btn, out);
+
+    tr.innerHTML = "<td><b>" + esc(label) + "</b></td>";
+    tr.append(use, model, status, test);
+    body.appendChild(tr);
+    dispHint(name); dispShowTest(name);
+  });
+}
+
+/* Offered, not enforced: /api/models entries by provider, and Claude's aliases. */
+function fillDispatchModels(){
+  const ids = provider => MODELS.filter(m => m.provider === provider).map(m => m.id);
+  [["claude", CLAUDE_MODELS], ["openai", ids("openai-codex")], ["openrouter", ids("openrouter")]].forEach(([name, list]) => {
+    const dl = document.getElementById("dispModels-" + name);
+    dl.innerHTML = "";
+    list.forEach(id => { const o = document.createElement("option"); o.value = id; dl.appendChild(o); });
+  });
+}
+
+async function dispCooldown(name){
+  const r = await dispPost("/api/dispatch/cooldown", {agent: name});
+  if (r.error){ alert(r.error); return; }
+  DISPATCH = r; renderDispatch();
+}
+
+/* A real call through the agent's CLI (up to two minutes), so the result lives outside the table:
+   a re-render while it runs must not lose it. */
+async function dispTest(name, label){
+  if (!confirm("Send one short test message to " + label + "? It uses your login.")) return;
+  DISP_TESTS[name] = {busy: true}; dispShowTest(name);
+  const r = await dispPost("/api/dispatch/test", {agent: name, confirm: true});
+  DISP_TESTS[name] = r.ok ? {ok: true, text: "ok" + (r.model ? " · " + r.model : ""), detail: r.answer ? "answered: " + r.answer : ""}
+    : {text: "error: " + (r.error || "failed"), detail: r.detail || ""};
+  dispShowTest(name);
+}
+
+function dispShowTest(name){
+  const t = DISP_TESTS[name] || {};
+  const btn = document.getElementById("dispTestBtn-" + name), out = document.getElementById("dispTest-" + name);
+  if (!btn || !out) return;
+  btn.disabled = !!t.busy;
+  out.className = "small " + (t.busy ? "muted" : t.ok ? "ok" : "fail");
+  out.textContent = t.busy ? " testing…" : t.text ? " " + t.text : "";
+  out.title = t.detail || "";
+  /* Also shown inline: a touch screen has no hover to reveal the title. */
+  if (!t.busy && t.detail){
+    const detail = document.createElement("span");
+    detail.id = "dispTestDetail-" + name; detail.className = "small muted";
+    detail.style.display = "block"; detail.textContent = t.detail;
+    out.appendChild(detail);
+  }
+}
+
+function renderDispOrder(){
+  const box = $("#dispOrderRows"); box.innerHTML = "";
+  DISP_ORDERS.forEach(([kind, label]) => {
+    const staged = DISP_PENDING.order[kind], order = staged || (DISPATCH.order || {})[kind] || [];
+    const row = document.createElement("div"), text = document.createElement("span"), swap = document.createElement("button");
+    text.innerHTML = esc(label) + ": <b>" + (order.map(n => esc(DISP_LABEL[n] || n)).join(" → ") || "none") + "</b>";
+    text.classList.toggle("changed", !!staged);
+    swap.className = "ghost"; swap.textContent = "Swap"; swap.setAttribute("aria-label", "Swap the order for " + label);
+    swap.onclick = () => {
+      const first = order.find(n => DISP_FRONTIER.includes(n)) || DISP_FRONTIER[0];
+      dispStage("order", kind, null, [DISP_FRONTIER.find(n => n !== first), first]);
+      renderDispOrder();
+    };
+    row.append(text, swap); box.appendChild(row);
+  });
+}
+
+/* A copy, so what was previewed is exactly what gets saved. */
+function dispChanges(){
+  const out = {};
+  ["profiles", "agents", "order"].forEach(s => { if (Object.keys(DISP_PENDING[s]).length) out[s] = DISP_PENDING[s]; });
+  return JSON.parse(JSON.stringify(out));
+}
+
+function renderDispSave(){
+  const p = DISP_PENDING;
+  const n = Object.keys(p.profiles).length + Object.keys(p.order).length +
+    Object.values(p.agents).reduce((sum, fields) => sum + Object.keys(fields).length, 0);
+  $("#dispPreviewBtn").textContent = "Preview dispatch changes" + (n ? " (" + n + ")" : "");
+  $("#dispPreviewBtn").disabled = !n;
+  $("#dispDiscardBtn").style.display = n ? "" : "none";
+}
+
+const dispShow = v => v === "" || v == null ? "(unset)" : Array.isArray(v) ? v.join(" → ") : String(v);
+
+$("#dispPreviewBtn").onclick = async () => {
+  const changes = dispChanges();
+  const r = await dispPost("/api/dispatch/plan", {changes});
+  if (JSON.stringify(changes) !== JSON.stringify(dispChanges())) return;    // edited meanwhile: preview again
+  const rows = r.rows || [];
+  DISP_PLANNED = !r.error && rows.length ? changes : null;
+  $("#dispReceipt").innerHTML = "";
+  $("#dispPlanErr").style.display = r.error ? "" : "none";
+  $("#dispPlanErr").textContent = r.error ? "Cannot save this: " + r.error : "";
+  $("#dispPlanRows").style.display = r.error ? "none" : "";
+  $("#dispPlanRows").textContent = rows.length
+    ? rows.map(x => x.setting + ":  " + dispShow(x.before) + "  →  " + dispShow(x.after)).join("\n") +
+      "\n\nfile: " + DISPATCH.fleet_file
+    : "Nothing to change: dispatch.json already says this.";
+  $("#dispConfirmBtn").style.display = DISP_PLANNED ? "" : "none";
+  $("#dispPreview").style.display = "";
+  $("#dispPreview").scrollIntoView({behavior:"smooth", block:"nearest"});
+};
+
+$("#dispDiscardBtn").onclick = () => {
+  DISP_PENDING = {profiles: {}, agents: {}, order: {}}; DISP_PLANNED = null;
+  $("#dispPreview").style.display = "none"; renderDispatch();
+};
+
+$("#dispConfirmBtn").onclick = async () => {
+  if (!DISP_PLANNED) return;
+  $("#dispConfirmBtn").disabled = true;
+  const r = await dispPost("/api/dispatch/apply", {changes: DISP_PLANNED, confirm: true});
+  $("#dispConfirmBtn").disabled = false;
+  DISP_PLANNED = null; $("#dispPreview").style.display = "none";
+  renderDispReceipt(r);
+  if (r.error) return;
+  DISP_PENDING = {profiles: {}, agents: {}, order: {}};
+  await loadDispatch();
+};
+
+function renderDispReceipt(r){
+  const title = r.error ? "Not saved" : !r.changed ? "Nothing to change"
+    : r.verified ? "Saved and verified" : "Saved, but the read-back did not verify";
+  let html = "<div class='receipt" + (r.error || r.verified === false ? " bad" : "") + "'><b>" + title + "</b>";
+  if (r.error) html += "<p class='small' style='margin:8px 0 0'>" + esc(r.error) + "</p>";
+  else {
+    if (r.changed) html += "<p class='small' style='margin:8px 0 0'>" + (r.backup
+      ? "Backup: <code>" + esc(r.backup) + "</code>" : "No backup: there was no dispatch.json yet.") + "</p>";
+    (r.mismatches || []).forEach(m => { html += "<div class='note dead'>" + esc(m.setting) + ": saved " +
+      esc(dispShow(m.after)) + ", read back " + esc(dispShow(m.read_back)) + ". Restore it from the backup.</div>"; });
+    (r.overridden || []).forEach(o => { html += "<div class='note dead'>" + esc(o.setting) + " stays different for " +
+      esc(o.profile) + ": its own <code>" + esc(o.file) + "</code> says otherwise, and wins there.</div>"; });
+    html += "<p class='small muted' style='margin:8px 0 0'>Takes effect on the next message. No restart.</p>";
+  }
+  $("#dispReceipt").innerHTML = html + "</div>";
+}
+
+function renderDispChecks(){
+  const d = DISPATCH, scope = dispScope(), lx = d.plugin.llm_execution;
+  const mark = {ok: "<span class='ok'>✓</span>", no: "<span class='fail'>✗</span>",
+                warn: "<span class='warn'>?</span>", none: "<span class='muted'>–</span>"};
+  const line = (state, html) => "<li>" + mark[state] + " " + html + "</li>";
+  const off = scope.filter(n => !d.profiles[n].plugin_enabled);
+  const file = {missing: ["none", "not there yet; saving here creates it"], ok: ["ok", "readable"],
+                broken: ["no", "cannot be read; nothing here saves until it is fixed by hand"]}[d.fleet_file_state]
+    || ["warn", d.fleet_file_state];
+  const broken = [...new Set(scope.flatMap(n => d.profiles[n].broken_files || []))];
+  $("#dispChecks").innerHTML = "<ul class='checks small'>" +
+    line(d.plugin.installed ? "ok" : "no", d.plugin.installed ? "Plugin installed"
+      : "Plugin not installed <span class='muted'>(this repo's install.py installs it)</span>") +
+    line(off.length ? "no" : "ok", CURRENT === ALL
+      ? "Enabled in " + (scope.length - off.length) + " of " + scope.length + " profiles" +
+        (off.length ? " <span class='muted'>(not in " + esc(off.join(", ")) + ")</span>" : "")
+      : off.length ? "Not enabled in this profile's config.yaml <span class='muted'>(run <code>python3 install.py --enable " +
+        esc(CURRENT) + "</code> from the repo, then restart the gateway once)</span>" : "Enabled in this profile") +
+    line(lx === true ? "ok" : lx === false ? "no" : "warn", "llm_execution: " + (lx === true ? "yes"
+      : lx === false ? "no <span class='muted'>(dispatch cannot act here; update Hermes)</span>"
+      : "unknown here, check <code>jev dispatch check</code>")) +
+    line(file[0], "Settings file <code>" + esc(d.fleet_file) + "</code>: " + esc(file[1])) + "</ul>" +
+    broken.map(f => "<div class='note dead'><code>" + esc(f) + "</code> cannot be read, so it turns every agent off " +
+      "and privacy to the strictest. Fix it by hand.</div>").join("") +
+    "<p class='small muted' style='margin:10px 0 0'>After installing, restart the gateway one time so Hermes loads the plugin.</p>";
+}
+
+/* Decisions only: the log never holds a turn's text or an answer. In shadow nobody else answers,
+   so an agent there is who would have. */
+function dispLiveRow(e, fresh){
+  const tr = document.createElement("tr");
+  if (fresh) tr.className = "fresh";
+  const agent = e.agent || "local";
+  const who = agent === "local" ? "this machine" : (e.live === true ? "" : "<span class='muted'>would be</span> ") +
+    "<b>" + esc(DISP_LABEL[agent] || agent) + "</b>" + (e.model ? " · " + esc(e.model) : "");
+  const cells = [e.ts ? esc(new Date(Number(e.ts) * 1000).toLocaleTimeString()) : "", esc(e.profile),
+    esc(e.mode) + (e.mode === "on" && e.live === false ? " <span class='muted'>(not live)</span>" : ""), who,
+    esc(e.privacy) + (e.privacy_why ? " <span class='muted'>· " + esc(e.privacy_why) + "</span>" : ""),
+    esc(e.niveau), (e.downgraded ? "<span class='warn'>downgraded</span> · " : "") + esc(e.reason),
+    (Array.isArray(e.attempts) ? e.attempts : []).map(a => esc((a || {}).agent) + ": " + esc((a || {}).error))
+      .join(", ") || "<span class='muted'>—</span>"];
+  tr.innerHTML = cells.map((c, i) => "<td" + (i === 6 ? ' class="wrap"' : "") + ">" + c + "</td>").join("");
+  return tr;
+}
+
+async function loadDispatchLive(){
+  const r = await fetch("/api/dispatch/live?since=0", {headers: HDR}).then(x => x.json()).catch(e => ({error: String(e)}));
+  const empty = $("#dispLiveEmpty");
+  if (!r || r.error){ empty.textContent = "Could not read the dispatch decisions: " + (r ? r.error : "no answer"); return; }
+  const events = (Array.isArray(r.events) ? r.events : []).map(e => e || {});
+  const body = $("#dispLiveBody"); body.innerHTML = "";
+  events.forEach(e => body.appendChild(dispLiveRow(e, DISP_SEEN && Number(e.ts) > DISP_SEEN)));
+  if (events.length) DISP_SEEN = Math.max(DISP_SEEN, Number(events[0].ts) || 0);
+  else DISP_SEEN = DISP_SEEN || r.now;
+  empty.textContent = events.length ? "Decisions only: the text of a turn and its answer are never logged or shown here."
+    : "No dispatch decisions yet. Set Shadow for a profile and send it a message.";
+}
 
 /* --- Jev live --- */
 let LIVE_TIMER = null, LIVE_SEEN = 0;
@@ -755,6 +1270,7 @@ function liveRow(e, fresh){
 }
 
 async function pollLive(){
+  loadDispatchLive();
   let r;
   try { r = await fetch("/api/jev/live", {headers: HDR}).then(x => x.json()); } catch (e) { return; }
   if (!r || r.error) return;

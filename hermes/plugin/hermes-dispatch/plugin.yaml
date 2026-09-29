@@ -1,0 +1,14 @@
+name: hermes-dispatch
+version: 0.1.0
+description: Front desk - hands a turn Jev judges hard to the agent that should answer it (Codex on a ChatGPT login, Claude Code, OpenRouter) and relays the answer unchanged; everything else stays on the local model. Off by default.
+author: hermes-jev-skills contributors
+license: MIT
+homepage: https://github.com/kerpopule/hermes-jev-skills
+manifest_version: 2
+provides_hooks:
+  - pre_llm_call
+  - transform_llm_output
+tags: [jev, routing, dispatch, receptionist]
+config_schema:
+  mode: {type: str, description: "off | shadow | on"}
+  notice: {type: str, description: "off | on"}

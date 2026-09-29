@@ -11,8 +11,10 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import dispatch_store as ds  # noqa: E402
 import routing_store as rs  # noqa: E402
 import server as srv  # noqa: E402
+from jevkit import dispatch, ladder  # noqa: E402
 
 CFG = """\
 model:
@@ -75,6 +77,55 @@ class ServerTestCase(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertIn("Hermes Model Routing", html)
         self.assertIn("Apply changes", html)
+
+    def test_page_has_the_dispatch_card_marked_new_in_this_fork(self):
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=10) as resp:
+            html = resp.read().decode()
+        # assertTrue, not assertIn: a miss would print the whole page.
+        for name in ("dispatchCard", "dispatchNew", "dispSeg", "dispConflict", "dispNotice", "dispPrivacy",
+                     "dispAgents", "dispOrder", "dispChecks", "dispPreview", "dispReceipt", "dispLive"):
+            with self.subTest(id=name):
+                self.assertTrue('id="%s"' % name in html, "the page has no element with id=%s" % name)
+        for text in ("new in this fork", "Added in this fork: the upstream hermes-jev-skills has no dispatch."):
+            with self.subTest(text=text):
+                self.assertTrue(text in html, "the page does not say: %s" % text)
+        jev, card, pools = (html.find('id="%s"' % name) for name in ("jevCard", "dispatchCard", "poolCard"))
+        self.assertTrue(0 <= jev < card < pools, "the dispatch card sits right after the Jev routing card")
+        # The page offers Claude's model aliases from its own copy of the store's list.
+        claude_models = "const CLAUDE_MODELS = %s;" % json.dumps(list(ds.CLAUDE_MODELS))
+        self.assertTrue(claude_models in html, "the page's CLAUDE_MODELS differs from dispatch_store's")
+
+    def test_all_profiles_dialog_says_what_a_dispatch_write_does(self):
+        """askAll's small print speaks for model routing: a backup first, then a gateway reload. A
+        dispatch switch has neither, and neither has the conflict fix, so their callers pass their own."""
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=10) as resp:
+            html = resp.read().decode()
+        for text in ("Each profile's own switch file is overwritten; there is no backup. "
+                     "It takes effect on the next message, no restart.",
+                     "Jev routing turns off for every profile on the next message, no restart.",
+                     # the model-routing callers keep theirs
+                     "Each profile's config is backed up first. Running agents keep their current model "
+                     "until their gateway reloads."):
+            with self.subTest(text=text):
+                self.assertTrue(text in html, "the page does not say: %s" % text)
+
+    def test_a_test_result_shows_its_detail_inline_not_only_on_hover(self):
+        """M1: touch screens have no hover, so the error detail cannot live only in a title."""
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=10) as resp:
+            html = resp.read().decode()
+        body = html[html.find("function dispShowTest"):]
+        body = body[:body.find("\n}\n")]
+        self.assertTrue("dispTestDetail" in body, "dispShowTest does not write the detail into the page")
+        self.assertTrue("small muted" in body, "the inline detail is not small muted text")
+
+    def test_plugin_not_enabled_line_says_how_to_enable_it(self):
+        """M2: the check line names the command and the one restart."""
+        with urllib.request.urlopen("http://127.0.0.1:%d/" % self.port, timeout=10) as resp:
+            html = resp.read().decode()
+        for text in ("Not enabled in this profile's config.yaml", "python3 install.py --enable ",
+                     "from the repo, then restart the gateway once"):
+            with self.subTest(text=text):
+                self.assertTrue(text in html, "the page does not say: %s" % text)
 
     def test_state_lists_profiles_and_use_cases(self):
         code, body = self.call("/api/state")
@@ -271,6 +322,348 @@ class AuthFlowTestCase(unittest.TestCase):
         code, _, body = self.get("/api/state")
         self.assertEqual(code, 401)
         self.assertIn("unauthorized", json.loads(body)["error"])
+
+
+_DEFAULT_TOKEN = object()  # "use self.token", so an explicit token=None in a call means "send none"
+
+
+class DispatchApiTestCase(unittest.TestCase):
+    """/api/dispatch/*: the same real-server fixture as ServerTestCase, with JEV_LADDER_STATE and
+    XDG_CONFIG_HOME pointed into the temp home and jevkit.keystore.resolve patched to None, so no
+    real key store or ladder is ever touched.
+
+    `token` is a class attribute a subclass overrides to require auth (see DispatchApiAuthTestCase
+    below, the token subclass pattern): `call()` sends it by default, so every test here still
+    passes once a token is required, and a test that wants to check the unauthenticated case passes
+    `token=None` explicitly to override that default.
+    """
+
+    token = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.home = cls.tmp.name
+        with open(os.path.join(cls.home, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(CFG)
+        os.makedirs(os.path.join(cls.home, "profiles", "wiki"), exist_ok=True)
+        with open(os.path.join(cls.home, "profiles", "wiki", "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(CFG)
+
+        cls.env = mock.patch.dict(os.environ, {
+            "XDG_CONFIG_HOME": os.path.join(cls.home, "xdg"),
+            "JEV_LADDER_STATE": os.path.join(cls.home, "jev", "ladder.json"),
+        })
+        cls.env.start()
+        for name in ("JEV_DISPATCH_POLICY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY"):
+            os.environ.pop(name, None)
+
+        # This sandbox's own `claude`/`codex` on PATH must never leak into a check_agents() result.
+        cls.which_patch = mock.patch("shutil.which", return_value=None)
+        cls.which_patch.start()
+        # state() calls check_agents with its default has_key, which calls keystore.resolve():
+        # on macOS that would shell out to the real Keychain. Never real, whatever the machine.
+        cls.keystore_patch = mock.patch.object(dispatch.keystore, "resolve", return_value=None)
+        cls.keystore_patch.start()
+
+        cfg = srv.Config(cls.home, cls.token)
+        cls.httpd = srv.make_server("127.0.0.1", 0, cfg)
+        cls.port = cls.httpd.server_address[1]
+        cls.thread = threading.Thread(target=cls.httpd.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+        cls.keystore_patch.stop()
+        cls.which_patch.stop()
+        cls.env.stop()
+        cls.tmp.cleanup()
+
+    def call(self, path, body=None, token=_DEFAULT_TOKEN):
+        if token is _DEFAULT_TOKEN:
+            token = self.token
+        url = "http://127.0.0.1:%d%s" % (self.port, path)
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(url, data=data, method="POST" if body is not None else "GET")
+        if data:
+            req.add_header("Content-Type", "application/json")
+        if token:
+            req.add_header("X-Dashboard-Token", token)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode())
+
+    def _post_raw(self, path, raw_body, token=_DEFAULT_TOKEN):
+        """POST literal bytes as the body — for a body call() cannot express (call()'s own
+        body=None means "no body / GET", so it cannot send the JSON literal null)."""
+        if token is _DEFAULT_TOKEN:
+            token = self.token
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path),
+                                     data=raw_body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        if token:
+            req.add_header("X-Dashboard-Token", token)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.loads(exc.read().decode())
+
+    # -- GET /api/dispatch/state --------------------------------------------------------
+    def test_dispatch_state_returns_both_profiles(self):
+        code, body = self.call("/api/dispatch/state")
+        self.assertEqual(code, 200)
+        self.assertEqual(set(body["profiles"]), {"default", "wiki"})
+
+    # -- POST /api/dispatch/switch -------------------------------------------------------
+    def test_dispatch_switch_sets_one_profile_from_dashboard(self):
+        code, body = self.call("/api/dispatch/switch", {"scope": "wiki", "switch": "mode", "value": "shadow"})
+        self.assertEqual(code, 200)
+        self.assertEqual(body["profiles"]["wiki"]["mode"], {"value": "shadow", "source": "dashboard"})
+
+    def test_dispatch_switch_all_without_confirm_is_rejected(self):
+        code, body = self.call("/api/dispatch/switch", {"scope": "__all__", "switch": "mode", "value": "on"})
+        self.assertEqual(code, 400)
+        self.assertIn("confirm", body["error"])
+
+    def test_dispatch_switch_bad_value_is_rejected(self):
+        code, body = self.call("/api/dispatch/switch", {"scope": "wiki", "switch": "mode", "value": "bogus"})
+        self.assertEqual(code, 400)
+
+    # -- POST /api/dispatch/plan ---------------------------------------------------------
+    def _read_if_exists(self, path):
+        if not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_dispatch_plan_previews_without_writing(self):
+        # Read the fleet file's own before/after, rather than asserting it is absent: another
+        # test in this class may have already created it (independent tests share one home).
+        fleet = os.path.join(self.home, "jev", "dispatch.json")
+        before = self._read_if_exists(fleet)
+        code, body = self.call("/api/dispatch/plan", {"changes": {"agents": {"claude": {"enabled": True}}}})
+        self.assertEqual(code, 200)
+        self.assertIn({"setting": "agents.claude.enabled", "before": False, "after": True}, body["rows"])
+        self.assertEqual(self._read_if_exists(fleet), before)
+
+    # -- POST /api/dispatch/apply --------------------------------------------------------
+    def test_dispatch_apply_requires_confirm(self):
+        code, body = self.call("/api/dispatch/apply", {"changes": {"agents": {"openai": {"enabled": True}}}})
+        self.assertEqual(code, 400)
+        self.assertIn("confirm", body["error"])
+
+    def test_dispatch_apply_writes_and_verifies(self):
+        code, body = self.call("/api/dispatch/apply", {"confirm": True,
+                                                        "changes": {"agents": {"openai": {"enabled": True}}}})
+        self.assertEqual(code, 200)
+        self.assertTrue(body["ok"], body)
+        self.assertTrue(body["verified"])
+        fleet = os.path.join(self.home, "jev", "dispatch.json")
+        with open(fleet, encoding="utf-8") as fh:
+            self.assertTrue(json.load(fh)["agents"]["openai"]["enabled"])
+
+    # -- GET /api/dispatch/live ----------------------------------------------------------
+    def test_dispatch_live_returns_only_dispatch_rows(self):
+        log = os.path.join(self.home, "logs", "jev-decisions.jsonl")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        with open(log, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": 1, "kind": "route", "tier": "medium", "model": "m"}) + "\n")
+            fh.write(json.dumps({"ts": 2, "kind": "dispatch", "agent": "openai", "model": "gpt-6"}) + "\n")
+        code, body = self.call("/api/dispatch/live?since=0")
+        self.assertEqual(code, 200)
+        self.assertEqual(len(body["events"]), 1)
+        self.assertEqual(body["events"][0]["agent"], "openai")
+        self.assertEqual(body["events"][0]["model"], "gpt-6")
+
+    # -- POST /api/dispatch/cooldown ------------------------------------------------------
+    def test_dispatch_cooldown_resets_and_rejects_unknown_agent(self):
+        ladder.refuse("dispatch:claude", "quota", cooldown=900)
+        self.assertGreater(ladder.cooling("dispatch:claude"), 0)
+        code, body = self.call("/api/dispatch/cooldown", {"agent": "claude"})
+        self.assertEqual(code, 200)
+        self.assertEqual(ladder.cooling("dispatch:claude"), 0)
+        self.assertEqual(body["agents"]["claude"]["cooling_s"], 0)
+
+        code, body = self.call("/api/dispatch/cooldown", {"agent": "bogus"})
+        self.assertEqual(code, 400)
+
+    # -- POST /api/dispatch/test ----------------------------------------------------------
+    def test_dispatch_test_requires_confirm_then_returns_the_fake_result(self):
+        code, body = self.call("/api/dispatch/test", {"agent": "claude"})
+        self.assertEqual(code, 400)
+        self.assertIn("confirm", body["error"])
+
+        fake = {"ok": True, "agent": "claude", "model": "opus", "answer": "ok"}
+        with mock.patch.object(ds, "test_agent", return_value=fake):
+            code, body = self.call("/api/dispatch/test", {"agent": "claude", "confirm": True})
+        self.assertEqual(code, 200)
+        self.assertEqual(body, fake)
+
+    # -- every /api/dispatch/* POST route: a non-object body -------------------------------
+    def test_dispatch_post_routes_reject_a_non_object_body(self):
+        """Valid JSON that is not an object (a list, a string, a number, a boolean, or the
+        literal null) must answer 400, never crash do_POST with an unhandled AttributeError
+        from payload.get(...) on a non-dict — which drops the connection instead of answering
+        at all (I1: reproduced live against router-dashboard/server.py:196-205)."""
+        paths = ["/api/dispatch/switch", "/api/dispatch/plan", "/api/dispatch/apply",
+                 "/api/dispatch/cooldown", "/api/dispatch/test"]
+        for path in paths:
+            for value in ([], "x", 1, True):
+                with self.subTest(path=path, body=value):
+                    code, body = self.call(path, value)
+                    self.assertEqual(code, 400)
+                    self.assertIn("error", body)
+            with self.subTest(path=path, body=None):
+                code, body = self._post_raw(path, b"null")
+                self.assertEqual(code, 400)
+                self.assertIn("error", body)
+
+
+class CrossSiteTestCase(unittest.TestCase):
+    """I3: the default loopback setup has no token, so a page on another site (or a DNS-rebound
+    name) must not be able to change settings. Every POST needs a JSON Content-Type, an Origin
+    (when sent) equal to http://<Host>, and a Host that names this server."""
+
+    SWITCH = {"scope": "wiki", "switch": "mode", "value": "on"}
+    token = None
+    # DispatchApiTestCase's hermetic fixture, without re-running its tests here.
+    setUpClass = classmethod(DispatchApiTestCase.setUpClass.__func__)
+    tearDownClass = classmethod(DispatchApiTestCase.tearDownClass.__func__)
+
+    def raw(self, path, body, headers):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.putrequest("POST", path, skip_host=True, skip_accept_encoding=True)
+            data = json.dumps(body).encode()
+            sent = {"Host": "127.0.0.1:%d" % self.port, "Content-Length": str(len(data))}
+            sent.update(headers)
+            if self.token:
+                sent["X-Dashboard-Token"] = self.token
+            for name, value in sent.items():
+                if value is not None:
+                    conn.putheader(name, value)
+            conn.endheaders(data)
+            resp = conn.getresponse()
+            return resp.status, json.loads(resp.read().decode() or "{}")
+        finally:
+            conn.close()
+
+    def mode(self):
+        return ds.state(self.home)["profiles"]["wiki"]["mode"]["value"]
+
+    def setUp(self):
+        ds.set_switch(self.home, "wiki", "mode", "off")
+
+    def test_a_text_plain_post_is_refused_with_415(self):
+        for path in ("/api/dispatch/switch", "/api/jev/switch", "/api/dispatch/apply", "/api/apply"):
+            for ctype in ("text/plain", "application/x-www-form-urlencoded", None):
+                with self.subTest(path=path, ctype=ctype):
+                    code, body = self.raw(path, dict(self.SWITCH, confirm=True), {"Content-Type": ctype})
+                    self.assertEqual(code, 415)
+                    self.assertIn("error", body)
+        self.assertEqual(self.mode(), "off")
+
+    def test_a_foreign_origin_is_refused_with_403(self):
+        for origin in ("https://evil.example", "http://127.0.0.1:1", "null",
+                       "https://127.0.0.1:%d" % self.port):
+            with self.subTest(origin=origin):
+                code, body = self.raw("/api/dispatch/switch", self.SWITCH,
+                                      {"Content-Type": "application/json", "Origin": origin})
+                self.assertEqual(code, 403)
+                self.assertIn("error", body)
+        self.assertEqual(self.mode(), "off")
+
+    def test_a_foreign_host_is_refused_with_403(self):
+        for host in ("evil.example:%d" % self.port, "evil.example", "127.0.0.1:1", None):
+            with self.subTest(host=host):
+                code, _ = self.raw("/api/dispatch/switch", self.SWITCH,
+                                   {"Content-Type": "application/json", "Host": host})
+                self.assertEqual(code, 403)
+        # a rebound name whose Origin matches its own Host is still refused
+        evil = "evil.example:%d" % self.port
+        code, _ = self.raw("/api/dispatch/switch", self.SWITCH,
+                           {"Content-Type": "application/json", "Host": evil, "Origin": "http://" + evil})
+        self.assertEqual(code, 403)
+        self.assertEqual(self.mode(), "off")
+
+    def test_a_same_origin_json_post_still_works(self):
+        for host in ("127.0.0.1:%d" % self.port, "localhost:%d" % self.port, "[::1]:%d" % self.port):
+            with self.subTest(host=host):
+                ds.set_switch(self.home, "wiki", "mode", "off")
+                code, body = self.raw("/api/dispatch/switch", self.SWITCH,
+                                      {"Content-Type": "application/json; charset=utf-8", "Host": host,
+                                       "Origin": "http://" + host})
+                self.assertEqual(code, 200, body)
+                self.assertEqual(self.mode(), "on")
+        ds.set_switch(self.home, "wiki", "mode", "off")
+        code, _ = self.raw("/api/dispatch/switch", self.SWITCH, {"Content-Type": "application/json"})
+        self.assertEqual(code, 200)          # no Origin at all: curl, scripts, the tests above
+
+
+class TokenHostTestCase(unittest.TestCase):
+    """With a token (required off loopback), the Host names whatever address people use to reach
+    the machine, so it is not held to the loopback list: the token already stops a rebound page,
+    which never has it. Origin must still match Host."""
+
+    def test_token_server_accepts_its_lan_host_but_not_a_foreign_origin(self):
+        import http.client
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        with open(os.path.join(tmp.name, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(CFG)
+        httpd = srv.make_server("127.0.0.1", 0, srv.Config(tmp.name, "s3cret"))
+        port = httpd.server_address[1]
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+
+        def post(headers):
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            try:
+                data = json.dumps({"profile": "default", "changes": {}}).encode()
+                conn.putrequest("POST", "/api/plan", skip_host=True, skip_accept_encoding=True)
+                for name, value in dict({"Content-Type": "application/json", "Content-Length": str(len(data)),
+                                         "X-Dashboard-Token": "s3cret"}, **headers).items():
+                    conn.putheader(name, value)
+                conn.endheaders(data)
+                return conn.getresponse().status
+            finally:
+                conn.close()
+
+        lan = "hermes-box.lan:%d" % port
+        self.assertEqual(post({"Host": lan, "Origin": "http://" + lan}), 200)
+        self.assertEqual(post({"Host": lan, "Origin": "https://evil.example"}), 403)
+
+
+class DispatchApiAuthTestCase(DispatchApiTestCase):
+    """The token subclass pattern: same fixture and every test above (now sent WITH the token
+    by call()'s default), plus one test that every /api/dispatch/* route refuses without it."""
+
+    token = "s3cret-dispatch"
+
+    def test_dispatch_routes_require_the_token(self):
+        get_paths = ["/api/dispatch/state", "/api/dispatch/live?since=0"]
+        post_calls = [
+            ("/api/dispatch/switch", {"scope": "wiki", "switch": "mode", "value": "shadow"}),
+            ("/api/dispatch/plan", {"changes": {}}),
+            ("/api/dispatch/apply", {"changes": {}, "confirm": True}),
+            ("/api/dispatch/cooldown", {"agent": "claude"}),
+            ("/api/dispatch/test", {"agent": "claude", "confirm": True}),
+        ]
+        for path in get_paths:
+            with self.subTest(path=path):
+                code, _ = self.call(path, token=None)
+                self.assertEqual(code, 401)
+        for path, payload in post_calls:
+            with self.subTest(path=path):
+                code, _ = self.call(path, payload, token=None)
+                self.assertEqual(code, 401)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
